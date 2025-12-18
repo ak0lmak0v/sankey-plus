@@ -2195,7 +2195,7 @@ export function addCircularPathData(
     // ignore
   }
 
-  // Post-pass (narrow): pull LOCAL bottom backlinks (span<=1) DOWN toward the deeper bottom "anchor"
+  // Post-pass (narrow): keep LOCAL bottom backlinks (span<=1) close to the deeper bottom "anchor"
   // in the same target-node bundle (typically a longer-span bottom link like `schedule ○→search ●`),
   // while preserving the minimum gap.
   //
@@ -2206,7 +2206,10 @@ export function addCircularPathData(
   // unnecessary slack, especially when there are no crossings.
   //
   // This pass is conservative:
-  // - it only moves links DOWN (increasing VFE),
+  // - it moves locals DOWN (increasing VFE) to remove slack,
+  // - and if locals ended up too deep (violating the min-gap to deepers), it moves the deeper
+  //   anchor(s) DOWN instead (never pulls locals UP, to avoid undoing other constraints like
+  //   right-leg min-length).
   // - it only acts within the same target node,
   // - it only applies to span<=1 locals,
   // - and it clamps the move so the outer-most local stays at least `circularLinkGap` above *any*
@@ -2281,15 +2284,35 @@ export function addCircularPathData(
         }
         if (maxAllowedOuterVfe === Infinity) return;
 
-        // Only pull down (increase VFE), and only if we can move at least a hair.
-        if (maxAllowedOuterVfe <= outerVfe + 1e-12) return;
-        var deltaPull = maxAllowedOuterVfe - outerVfe;
+        // If there is slack (outerLocal is too high), pull locals DOWN to sit close above the deepers.
+        if (maxAllowedOuterVfe > outerVfe + 1e-12) {
+          var deltaPullDown = maxAllowedOuterVfe - outerVfe;
+          for (var m = 0; m < locals.length; m++) {
+            var cLoc = locals[m].circularPathData;
+            cLoc.verticalFullExtent += deltaPullDown;
+            if (typeof cLoc.verticalBuffer === "number") cLoc.verticalBuffer += deltaPullDown;
+          }
+          return;
+        }
 
-        // Move ALL locals together (keeps their relative nesting/gaps intact).
-        for (var m = 0; m < locals.length; m++) {
-          var cLoc = locals[m].circularPathData;
-          cLoc.verticalFullExtent += deltaPull;
-          if (typeof cLoc.verticalBuffer === "number") cLoc.verticalBuffer += deltaPull;
+        // If outerLocal is already too deep (violates min-gap to deepers), do NOT pull locals UP
+        // (that can break right-leg min-length). Instead, push the deeper anchor(s) DOWN until the
+        // constraint is satisfied.
+        if (outerVfe > maxAllowedOuterVfe + 1e-12) {
+          for (var dj2 = 0; dj2 < deepers.length; dj2++) {
+            var d2 = deepers[dj2];
+            var cD2 = d2 && d2.circularPathData;
+            if (!cD2 || typeof cD2.verticalFullExtent !== "number") continue;
+            var d2Vfe = cD2.verticalFullExtent;
+            var d2W = d2.width || 0;
+            // Need: outerVfe <= dVfe - (dW + outerW)/2 - pullDownGap - epsPull
+            // => dVfe >= outerVfe + (dW + outerW)/2 + pullDownGap + epsPull
+            var minD2Vfe = outerVfe + (d2W + outerW) / 2 + pullDownGap + epsPull;
+            if (d2Vfe + 1e-12 >= minD2Vfe) continue;
+            var deltaD2 = minD2Vfe - d2Vfe;
+            cD2.verticalFullExtent += deltaD2;
+            if (typeof cD2.verticalBuffer === "number") cD2.verticalBuffer += deltaD2;
+          }
         }
       });
     }
@@ -2546,6 +2569,20 @@ function calcVerticalBuffer(links, nodes, id, circularLinkGap, graph, verticalMa
       // Primary key: target vertical position (y0). This makes all backlinks entering the
       // upper target node come before those entering a lower target node.
       // Secondary key (only when y0 is equal): smaller target node first.
+      // NOTE: for BOTTOM backlinks, we invert the group order (lower targets first) so
+      // lower targets curl less deep and don't get pushed by upper-target backlinks.
+      if (aIsBottomBacklinkForDepth && bIsBottomBacklinkForDepth) {
+        var aTgtCYGroup =
+          a.target && typeof a.target.y0 === "number" && typeof a.target.y1 === "number"
+            ? (a.target.y0 + a.target.y1) / 2
+            : 0;
+        var bTgtCYGroup =
+          b.target && typeof b.target.y0 === "number" && typeof b.target.y1 === "number"
+            ? (b.target.y0 + b.target.y1) / 2
+            : 0;
+        if (Math.abs(aTgtCYGroup - bTgtCYGroup) >= 1e-6) return bTgtCYGroup - aTgtCYGroup;
+      }
+
       var aTgtY0 = a.target && typeof a.target.y0 === "number" ? a.target.y0 : 0;
       var bTgtY0 = b.target && typeof b.target.y0 === "number" ? b.target.y0 : 0;
       if (Math.abs(aTgtY0 - bTgtY0) >= 1e-6) return aTgtY0 - bTgtY0;
