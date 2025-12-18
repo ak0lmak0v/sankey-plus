@@ -1263,9 +1263,16 @@ export function addCircularPathData(
 
       for (var bi = 0; bi < bottomCircular.length; bi++) {
         var currL = bottomCircular[bi];
+        // Keep self-loops compact: never push self-loops deeper in the global bottom-band min-gap pass.
+        // Instead, other links will be pushed away from the self-loop when THEY are processed.
+        if (selfLinking(currL, id)) continue;
         var currW = currL.width || 0;
         var currVfe = currL.circularPathData.verticalFullExtent;
         var targetVfe = currVfe;
+        // Optional debug: capture the single tightest constraint that forces this push (if any).
+        // NOTE: self-loops can still be pushed here even if their vBuf was set to 0 earlier.
+        var _dbgMinBottom = !!currL._debugCircular;
+        var _dbgBest = null; // { allowedCurrVfe, prevLink, overlapMode, xOverlap, prevBottom, required, span }
 
         // Bottom-band X range (inner extents).
         var cL =
@@ -1282,19 +1289,23 @@ export function addCircularPathData(
         for (var pj = 0; pj < bi; pj++) {
           var prevL = bottomCircular[pj];
 
-          // For very local bottom links (span<=1), keep the old conservative behavior:
-          // only enforce against links that actually cross. This preserves compactness.
+          // Prefer geometric crossing detection, but fall back to inner-X shelf overlap when available.
+          // This avoids cases where two bottom shelves clearly overlap in X (inner extents overlap)
+          // yet the higher-level crossing heuristic returns false and the shelves visually merge.
           var span = Math.abs((currL.source.column || 0) - (currL.target.column || 0));
           var overlaps = circularLinksActuallyCross(prevL, currL);
-          if (!overlaps && span > 1 && cL !== undefined && cR !== undefined) {
+          var overlapMode = overlaps ? "cross" : "none";
+          var xOverlap = undefined;
+          if (!overlaps && cL !== undefined && cR !== undefined) {
             if (
               typeof prevL.circularPathData.leftInnerExtent === "number" &&
               typeof prevL.circularPathData.rightInnerExtent === "number"
             ) {
               var pL = Math.min(prevL.circularPathData.leftInnerExtent, prevL.circularPathData.rightInnerExtent);
               var pR = Math.max(prevL.circularPathData.leftInnerExtent, prevL.circularPathData.rightInnerExtent);
-              var xOverlap = Math.min(pR, cR) - Math.max(pL, cL);
+              xOverlap = Math.min(pR, cR) - Math.max(pL, cL);
               overlaps = xOverlap > 1e-6;
+              overlapMode = overlaps ? "xOverlap" : "none";
             }
           }
           if (!overlaps) continue;
@@ -1303,6 +1314,28 @@ export function addCircularPathData(
           var prevBottom = prevL.circularPathData.verticalFullExtent + prevW / 2;
           var allowedCurrVfe = prevBottom + minBottomGap + currW / 2;
           if (targetVfe < allowedCurrVfe) targetVfe = allowedCurrVfe;
+
+          if (_dbgMinBottom && (!_dbgBest || allowedCurrVfe > _dbgBest.allowedCurrVfe + 1e-12)) {
+            _dbgBest = {
+              kind: "minBottomGap",
+              iter: it,
+              overlapMode: overlapMode,
+              xOverlap: xOverlap,
+              span: span,
+              minBottomGap: minBottomGap,
+              prevBottom: prevBottom,
+              required:
+                minBottomGap + (prevW / 2) + (currW / 2),
+              allowedCurrVfe: allowedCurrVfe,
+              prev: {
+                index: prevL.index,
+                source: prevL.source && prevL.source.name,
+                target: prevL.target && prevL.target.name,
+                width: prevW,
+                vfe: prevL.circularPathData.verticalFullExtent
+              }
+            };
+          }
         }
 
         if (targetVfe > currVfe + 1e-12) {
@@ -1311,12 +1344,120 @@ export function addCircularPathData(
           if (typeof currL.circularPathData.verticalBuffer === "number") {
             currL.circularPathData.verticalBuffer += push;
           }
+          if (_dbgMinBottom) {
+            // Use quoted property access so production minification doesn't mangle the debug field name.
+            var _dbgKey = "_debugMinGapCauses";
+            if (!currL.circularPathData[_dbgKey]) currL.circularPathData[_dbgKey] = [];
+            currL.circularPathData[_dbgKey].push({
+              kind: "minBottomGap",
+              iter: it,
+              curr: {
+                index: currL.index,
+                source: currL.source && currL.source.name,
+                target: currL.target && currL.target.name,
+                width: currW,
+                vfeBefore: currVfe,
+                vfeAfter: currVfe + push
+              },
+              targetVfe: targetVfe,
+              push: push,
+              tightest: _dbgBest
+            });
+          }
           changed = true;
         }
       }
 
       if (!changed) break;
     }
+
+    // Debug-only: after the pass converges, record the *tightest* constraint for any link that opts in
+    // via `link._debugCircular`. This is useful for self-loops that can end up deep without an
+    // easy-to-capture per-iteration "push" event.
+    //
+    // Stored on `circularPathData["_debugMinBottomGapSummary"]` so minification won't rename the key.
+    (bottomCircular || []).forEach(function(currL, biFinal) {
+      if (!currL || !currL._debugCircular || !currL.circularPathData) return;
+      var c = currL.circularPathData;
+      if (typeof c.verticalFullExtent !== "number") return;
+
+      var currW = currL.width || 0;
+      var currVfe = c.verticalFullExtent;
+      var best = null;
+
+      // Bottom-band X range (inner extents).
+      var cL =
+        typeof c.leftInnerExtent === "number" && typeof c.rightInnerExtent === "number"
+          ? Math.min(c.leftInnerExtent, c.rightInnerExtent)
+          : undefined;
+      var cR =
+        typeof c.leftInnerExtent === "number" && typeof c.rightInnerExtent === "number"
+          ? Math.max(c.leftInnerExtent, c.rightInnerExtent)
+          : undefined;
+
+      for (var pj = 0; pj < biFinal; pj++) {
+        var prevL = bottomCircular[pj];
+        if (!prevL || !prevL.circularPathData) continue;
+        if (typeof prevL.circularPathData.verticalFullExtent !== "number") continue;
+
+        var span = Math.abs((currL.source.column || 0) - (currL.target.column || 0));
+        var overlaps = circularLinksActuallyCross(prevL, currL);
+        var overlapMode = overlaps ? "cross" : "none";
+        var xOverlap = undefined;
+
+        if (!overlaps && span > 1 && cL !== undefined && cR !== undefined) {
+          if (
+            typeof prevL.circularPathData.leftInnerExtent === "number" &&
+            typeof prevL.circularPathData.rightInnerExtent === "number"
+          ) {
+            var pL = Math.min(prevL.circularPathData.leftInnerExtent, prevL.circularPathData.rightInnerExtent);
+            var pR = Math.max(prevL.circularPathData.leftInnerExtent, prevL.circularPathData.rightInnerExtent);
+            xOverlap = Math.min(pR, cR) - Math.max(pL, cL);
+            overlaps = xOverlap > 1e-6;
+            overlapMode = overlaps ? "xOverlap" : "none";
+          }
+        }
+        if (!overlaps) continue;
+
+        var prevW = prevL.width || 0;
+        var prevBottom = prevL.circularPathData.verticalFullExtent + prevW / 2;
+        var allowedCurrVfe = prevBottom + minBottomGap + currW / 2;
+
+        if (!best || allowedCurrVfe > best.allowedCurrVfe + 1e-12) {
+          best = {
+            overlapMode: overlapMode,
+            xOverlap: xOverlap,
+            span: span,
+            prev: {
+              index: prevL.index,
+              source: prevL.source && prevL.source.name,
+              target: prevL.target && prevL.target.name,
+              width: prevW,
+              vfe: prevL.circularPathData.verticalFullExtent
+            },
+            allowedCurrVfe: allowedCurrVfe
+          };
+        }
+      }
+
+      var _dbgKeySummary = "_debugMinBottomGapSummary";
+      c[_dbgKeySummary] = {
+        kind: "minBottomGap",
+        rank: biFinal,
+        minBottomGap: minBottomGap,
+        curr: {
+          index: currL.index,
+          source: currL.source && currL.source.name,
+          target: currL.target && currL.target.name,
+          width: currW,
+          vfe: currVfe,
+          vBuf: c.verticalBuffer
+        },
+        tightest: best,
+        // How far above the tightest constraint we currently sit (negative would mean violation).
+        slack: best ? (currVfe - best.allowedCurrVfe) : null
+      };
+    });
   }
 
   // Post-pass: self-loops must always stay closer to the node than other bottom circular links
@@ -1437,12 +1578,119 @@ export function addCircularPathData(
             if (typeof outer.circularPathData.verticalBuffer === "number") {
               outer.circularPathData.verticalBuffer += pushDown;
             }
+            if (outer._debugCircular) {
+              // Use quoted property access so production minification doesn't mangle the debug field name.
+              var _dbgKeyPB = "_debugMinGapCauses";
+              if (!outer.circularPathData[_dbgKeyPB]) outer.circularPathData[_dbgKeyPB] = [];
+              outer.circularPathData[_dbgKeyPB].push({
+                kind: "perTargetBottomGap",
+                iter: itPB,
+                target: outer.target && outer.target.name,
+                gapNow: gapNowB,
+                requiredGap: perTargetBottomGap,
+                push: pushDown,
+                inner: {
+                  index: inner.index,
+                  source: inner.source && inner.source.name,
+                  target: inner.target && inner.target.name,
+                  width: inner.width || 0,
+                  vfe: inner.circularPathData.verticalFullExtent
+                },
+                outer: {
+                  index: outer.index,
+                  source: outer.source && outer.source.name,
+                  target: outer.target && outer.target.name,
+                  width: outer.width || 0,
+                  vfeAfter: outer.circularPathData.verticalFullExtent
+                }
+              });
+            }
             changedPB = true;
           }
         }
         if (!changedPB) break;
       }
     });
+  }
+
+  // Finalize: after self-loop and per-target bottom passes, re-enforce the global bottom-band min-gap.
+  // These later passes can push some links deeper, which can re-introduce shelf overlaps with other
+  // bottom links (e.g. `schedule ○→filter` getting pushed can overlap `listing ○→search ●`).
+  //
+  // Keep self-loops compact: treat them as fixed anchors (never push them), and push non-self links away.
+  if (minBottomGap > 0) {
+    var bottomCircular2 = graph.links.filter(function(l) {
+      return (
+        l &&
+        l.circular &&
+        l.circularLinkType === "bottom" &&
+        !l.isVirtual &&
+        l.circularPathData &&
+        typeof l.circularPathData.verticalFullExtent === "number"
+      );
+    });
+    var maxIters2 = 10;
+    for (var it2 = 0; it2 < maxIters2; it2++) {
+      var changed2 = false;
+      bottomCircular2.sort(function(a, b) {
+        return a.circularPathData.verticalFullExtent - b.circularPathData.verticalFullExtent;
+      });
+
+      for (var bi2 = 0; bi2 < bottomCircular2.length; bi2++) {
+        var curr2 = bottomCircular2[bi2];
+        if (!curr2) continue;
+        if (selfLinking(curr2, id)) continue; // keep self-loops compact/inner
+        var currW2 = curr2.width || 0;
+        var currVfe2 = curr2.circularPathData.verticalFullExtent;
+        var targetVfe2 = currVfe2;
+
+        var cL2 =
+          typeof curr2.circularPathData.leftInnerExtent === "number" &&
+          typeof curr2.circularPathData.rightInnerExtent === "number"
+            ? Math.min(curr2.circularPathData.leftInnerExtent, curr2.circularPathData.rightInnerExtent)
+            : undefined;
+        var cR2 =
+          typeof curr2.circularPathData.leftInnerExtent === "number" &&
+          typeof curr2.circularPathData.rightInnerExtent === "number"
+            ? Math.max(curr2.circularPathData.leftInnerExtent, curr2.circularPathData.rightInnerExtent)
+            : undefined;
+
+        for (var pj2 = 0; pj2 < bi2; pj2++) {
+          var prev2 = bottomCircular2[pj2];
+          if (!prev2 || !prev2.circularPathData) continue;
+
+          var overlaps2 = circularLinksActuallyCross(prev2, curr2);
+          if (!overlaps2 && cL2 !== undefined && cR2 !== undefined) {
+            if (
+              typeof prev2.circularPathData.leftInnerExtent === "number" &&
+              typeof prev2.circularPathData.rightInnerExtent === "number"
+            ) {
+              var pL2 = Math.min(prev2.circularPathData.leftInnerExtent, prev2.circularPathData.rightInnerExtent);
+              var pR2 = Math.max(prev2.circularPathData.leftInnerExtent, prev2.circularPathData.rightInnerExtent);
+              var xOv2 = Math.min(pR2, cR2) - Math.max(pL2, cL2);
+              overlaps2 = xOv2 > 1e-6;
+            }
+          }
+          if (!overlaps2) continue;
+
+          var prevW2 = prev2.width || 0;
+          var prevBottom2 = prev2.circularPathData.verticalFullExtent + prevW2 / 2;
+          var allowed2 = prevBottom2 + minBottomGap + currW2 / 2;
+          if (targetVfe2 < allowed2) targetVfe2 = allowed2;
+        }
+
+        if (targetVfe2 > currVfe2 + 1e-12) {
+          var push2 = (targetVfe2 - currVfe2) + 1e-6;
+          curr2.circularPathData.verticalFullExtent = currVfe2 + push2;
+          if (typeof curr2.circularPathData.verticalBuffer === "number") {
+            curr2.circularPathData.verticalBuffer += push2;
+          }
+          changed2 = true;
+        }
+      }
+
+      if (!changed2) break;
+    }
   }
 
   // Post-pass: enforce minimum vertical gap WITHIN each TOP target-node bundle.
@@ -1457,6 +1705,8 @@ export function addCircularPathData(
       if (!l || !l.circular || l.isVirtual || l.circularLinkType !== "top") return;
       if (!l.circularPathData || typeof l.circularPathData.verticalFullExtent !== "number") return;
       if (!l.target) return;
+      // Keep self-loops compact: do not push top self-loops further up in per-target top-gap pass.
+      if (selfLinking(l, id)) return;
       var key = l.target; // object identity
       var arr = topByTarget.get(key);
       if (!arr) { arr = []; topByTarget.set(key, arr); }
@@ -1519,6 +1769,9 @@ export function addCircularPathData(
       });
       for (var ti = 0; ti < topCircular.length; ti++) {
         var currT = topCircular[ti]; // current link (closer-to-node earlier, outer later)
+        // Keep self-loops compact: never push top self-loops further up in the global top-band min-gap pass.
+        // Other links will be pushed away from them when processed.
+        if (selfLinking(currT, id)) continue;
         var currW = currT.width || 0;
         var currVfe = currT.circularPathData.verticalFullExtent;
         var targetVfe = currVfe;
@@ -1586,6 +1839,112 @@ export function addCircularPathData(
       c.verticalLeftInnerExtent = c.verticalFullExtent + c.leftLargeArcRadius;
     }
   });
+
+  // Debug-only: after ALL vertical passes have run, capture the final tightest bottom-band
+  // min-gap constraint for any opted-in link (`link._debugCircular`), especially self-loops.
+  //
+  // Stored under a quoted key so minification won't rename it.
+  try {
+    var _dbgFinalKey = "_debugFinalBottomGapConstraint";
+    var _dbgMinBottomGap = circularLinkGap || 0;
+    if (_dbgMinBottomGap > 0) {
+      var _dbgBottom = graph.links.filter(function(l) {
+        return (
+          l &&
+          l.circular &&
+          l.circularLinkType === "bottom" &&
+          !l.isVirtual &&
+          l.circularPathData &&
+          typeof l.circularPathData.verticalFullExtent === "number"
+        );
+      });
+      _dbgBottom.sort(function(a, b) {
+        return a.circularPathData.verticalFullExtent - b.circularPathData.verticalFullExtent;
+      });
+
+      for (var biDbg = 0; biDbg < _dbgBottom.length; biDbg++) {
+        var currD = _dbgBottom[biDbg];
+        if (!currD || !currD._debugCircular || !currD.circularPathData) continue;
+        var cD = currD.circularPathData;
+        var currWDbg = currD.width || 0;
+        var currVfeDbg = cD.verticalFullExtent;
+        var bestDbg = null;
+
+        // Bottom-band X range (inner extents).
+        var cLD =
+          typeof cD.leftInnerExtent === "number" && typeof cD.rightInnerExtent === "number"
+            ? Math.min(cD.leftInnerExtent, cD.rightInnerExtent)
+            : undefined;
+        var cRD =
+          typeof cD.leftInnerExtent === "number" && typeof cD.rightInnerExtent === "number"
+            ? Math.max(cD.leftInnerExtent, cD.rightInnerExtent)
+            : undefined;
+
+        for (var pjDbg = 0; pjDbg < biDbg; pjDbg++) {
+          var prevD = _dbgBottom[pjDbg];
+          if (!prevD || !prevD.circularPathData) continue;
+          if (typeof prevD.circularPathData.verticalFullExtent !== "number") continue;
+
+          var spanDbg = Math.abs((currD.source.column || 0) - (currD.target.column || 0));
+          var overlapsDbg = circularLinksActuallyCross(prevD, currD);
+          var overlapModeDbg = overlapsDbg ? "cross" : "none";
+          var xOverlapDbg = undefined;
+
+          if (!overlapsDbg && spanDbg > 1 && cLD !== undefined && cRD !== undefined) {
+            if (
+              typeof prevD.circularPathData.leftInnerExtent === "number" &&
+              typeof prevD.circularPathData.rightInnerExtent === "number"
+            ) {
+              var pLD = Math.min(prevD.circularPathData.leftInnerExtent, prevD.circularPathData.rightInnerExtent);
+              var pRD = Math.max(prevD.circularPathData.leftInnerExtent, prevD.circularPathData.rightInnerExtent);
+              xOverlapDbg = Math.min(pRD, cRD) - Math.max(pLD, cLD);
+              overlapsDbg = xOverlapDbg > 1e-6;
+              overlapModeDbg = overlapsDbg ? "xOverlap" : "none";
+            }
+          }
+          if (!overlapsDbg) continue;
+
+          var prevWDbg = prevD.width || 0;
+          var prevBottomDbg = prevD.circularPathData.verticalFullExtent + prevWDbg / 2;
+          var allowedCurrVfeDbg = prevBottomDbg + _dbgMinBottomGap + currWDbg / 2;
+
+          if (!bestDbg || allowedCurrVfeDbg > bestDbg.allowedCurrVfe + 1e-12) {
+            bestDbg = {
+              overlapMode: overlapModeDbg,
+              xOverlap: xOverlapDbg,
+              span: spanDbg,
+              prev: {
+                index: prevD.index,
+                source: prevD.source && prevD.source.name,
+                target: prevD.target && prevD.target.name,
+                width: prevWDbg,
+                vfe: prevD.circularPathData.verticalFullExtent
+              },
+              allowedCurrVfe: allowedCurrVfeDbg
+            };
+          }
+        }
+
+        cD[_dbgFinalKey] = {
+          kind: "minBottomGap",
+          minBottomGap: _dbgMinBottomGap,
+          rank: biDbg,
+          curr: {
+            index: currD.index,
+            source: currD.source && currD.source.name,
+            target: currD.target && currD.target.name,
+            width: currWDbg,
+            vfe: currVfeDbg,
+            vBuf: cD.verticalBuffer
+          },
+          tightest: bestDbg,
+          slack: bestDbg ? (currVfeDbg - bestDbg.allowedCurrVfe) : null
+        };
+      }
+    }
+  } catch (eDbgFinal) {
+    // ignore debug failures
+  }
 
   graph.links.forEach(function(link) {
     if (link.circular) {
@@ -2392,17 +2751,16 @@ function circularLinksActuallyCross(link1, link2) {
   var link2Self = link2SelfLoop;
   
   if (link1Self || link2Self) {
-    // A self-loop's "bubble" lives in its column. It can be intersected by any other circular
-    // link that has an ENDPOINT in that same column (right or left vertical leg), even if the
-    // nodes are different (same column, different node).
+    // A self-loop's "bubble" lives at its node position. It can ONLY be intersected by circular
+    // links that SHARE THE SAME NODE (enter or exit from the same node).
     //
-    // We deliberately do NOT stack against links that merely *span past* the column without an
-    // endpoint there (no vertical leg in that column in our path model).
-    var selfCol = link1Self ? link1Source : link2Source;
-    var other = link1Self ? link2 : link1;
-    var otherSourceCol = other && other.source ? other.source.column : undefined;
-    var otherTargetCol = other && other.target ? other.target.column : undefined;
-    if (otherSourceCol === selfCol || otherTargetCol === selfCol) return true;
+    // Previously we stacked self-loops against ALL links with an endpoint in the same column,
+    // but that caused self-loops to accumulate huge verticalBuffer values when sharing a column
+    // with other nodes (e.g. filter, autosearch, listing ○ in the same column).
+    //
+    // A self-loop physically only occupies space near its own node, so it should only stack
+    // against links that actually share that node.
+    if (shareNode) return true;
     return false;
   }
 
@@ -2668,9 +3026,22 @@ function getLinkBaseY(link, nodes, type) {
 }
 
 // Returns both minY and maxY extents of REAL nodes in the link's spanned columns.
+// For self-loops (source === target), we ONLY use the node's own extents,
+// NOT the whole column, so self-loops stay compact near their node.
 function getLinkBaseExtents(link, nodes) {
   var relevantMinY = Math.min(link.source.y0, link.target.y0);
   var relevantMaxY = Math.max(link.source.y1, link.target.y1);
+
+  // Self-loop check: source and target are the same node (by object or by name).
+  var isSelfLoop = (link.source === link.target) ||
+    (link.source && link.target && 
+     link.source.name !== undefined && link.target.name !== undefined &&
+     link.source.name === link.target.name);
+
+  // For self-loops, don't scan other nodes - keep baseY close to the node itself.
+  if (isSelfLoop) {
+    return { minY: relevantMinY, maxY: relevantMaxY };
+  }
 
   nodes.forEach(function(node) {
     if (node.virtual || (node.name && node.name.indexOf('virtualNode') === 0)) {
