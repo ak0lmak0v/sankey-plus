@@ -377,6 +377,40 @@ function selectCircularLinkTypes(inputGraph, id) {
           link.circularLinkType = "bottom";
         }
         trace(link, "pass1/forward-by-vertical");
+
+        // Narrow override: forward span=1 circulars whose target is ABOVE their source can often route
+        // cleanly via BOTTOM when the source node is already at/near the diagram bottom.
+        // Without forcing, the later source-column consistency pass may flip them to TOP.
+        // This is exactly the `autosearch→search ●` case in `test-debug.html`.
+        var spanF = Math.abs((link.source.column || 0) - (link.target.column || 0));
+        if (spanF === 1 && targetCenter < sourceCenter && link.circularLinkType === "bottom") {
+          var srcHf = (link.source.y1 - link.source.y0) || 0;
+          var tgtHf = (link.target.y1 - link.target.y0) || 0;
+          var localThresholdF = Math.max(srcHf, tgtHf);
+
+          // Use the SOURCE COLUMN bottom (not the whole-diagram bottom).
+          // Using the global bottom can misclassify the link when other columns extend lower.
+          var colBottomF = -Infinity;
+          if (graph && Array.isArray(graph.nodes)) {
+            for (var fbi = 0; fbi < graph.nodes.length; fbi++) {
+              var nn = graph.nodes[fbi];
+              if (!nn || nn.column !== link.source.column) continue;
+              var ny1f = typeof nn.y1 === "number" ? nn.y1 : -Infinity;
+              if (ny1f > colBottomF) colBottomF = ny1f;
+            }
+          }
+          if (!isFinite(colBottomF)) colBottomF = link.source.y1;
+
+          var nearBottomF =
+            link.source && typeof link.source.y1 === "number"
+              ? (colBottomF - link.source.y1) < Math.max(60, localThresholdF * 0.75)
+              : false;
+
+          if (nearBottomF) {
+            link._forcedCircularLinkType = "bottom";
+            trace(link, "pass1/forward-local-near-bottom/force-bottom");
+          }
+        }
       } else {
         // Backward circular links: route towards target
         // Prefer geometric consistency but allow balancing if not extreme
@@ -403,6 +437,9 @@ function selectCircularLinkTypes(inputGraph, id) {
   // because they sit under the dense TOP bundles. This matches the UX expectation for
   // "between two adjacent columns" backlinks.
   // EXCEPTION: If target is significantly ABOVE source, route TOP (more natural path).
+  // Narrow refinement: if the SOURCE is already very close to the diagram bottom,
+  // allow BOTTOM even when the target is above (it can be both shorter and visually clean),
+  // e.g. `autosearch→search ●` in `test-debug.html`.
   graph.links.forEach(function (link) {
     if (!link.circular || selfLinking(link, id)) return;
     if (link._forcedCircularLinkType) return;
@@ -422,8 +459,50 @@ function selectCircularLinkTypes(inputGraph, id) {
     // Only force TOP when target is *clearly* above source; otherwise you can end up
     // with visually-bottom links still participating in TOP buffering.
     var verticalDiff = sourceCenter - targetCenter; // positive when target is above
-    var targetSignificantlyAbove = verticalDiff > localThreshold * 0.75;
-    if (targetSignificantlyAbove) {
+    // Be conservative when forcing TOP: require the target to be more than ~one target-height above.
+    // The older 0.75 factor was too eager and could force TOP for cases where BOTTOM is shorter and clean.
+    var targetSignificantlyAbove = verticalDiff > localThreshold * 1.0;
+
+    // If source is already near the bottom of the diagram, going bottom-first can be
+    // both shorter and cleaner even when the target is above.
+    var nearBottom = false;
+    var _dbgColBottom = undefined;
+    if (link.source && typeof link.source.y1 === "number") {
+      // Use a fairly generous threshold: if the source node is already close to the bottom edge,
+      // a bottom-routed span=1 backlink can be shorter even when the target is above.
+      //
+      // Use the SOURCE COLUMN bottom (not the whole-diagram bottom).
+      var colBottom = -Infinity;
+      if (graph && Array.isArray(graph.nodes)) {
+        for (var bi = 0; bi < graph.nodes.length; bi++) {
+          var nn = graph.nodes[bi];
+          if (!nn || nn.column !== link.source.column) continue;
+          var ny1 = typeof nn.y1 === "number" ? nn.y1 : -Infinity;
+          if (ny1 > colBottom) colBottom = ny1;
+        }
+      }
+      if (!isFinite(colBottom)) colBottom = link.source.y1;
+
+      nearBottom = (colBottom - link.source.y1) < Math.max(60, localThreshold * 0.75);
+      _dbgColBottom = colBottom;
+    }
+
+    if (link._debugCircular) {
+      if (!link._debugTypeTrace) link._debugTypeTrace = [];
+      link._debugTypeTrace.push({
+        stage: "pass2/local-backlink/decision",
+        isBackward: isBackward,
+        span: span,
+        verticalDiff: verticalDiff,
+        localThreshold: localThreshold,
+        targetSignificantlyAbove: targetSignificantlyAbove,
+        colBottom: _dbgColBottom,
+        sourceY1: link.source && link.source.y1,
+        nearBottom: nearBottom,
+      });
+    }
+
+    if (targetSignificantlyAbove && !nearBottom) {
       link.circularLinkType = "top";
       link._forcedCircularLinkType = "top";
       trace(link, "pass2/local-backlink/force-top");
@@ -641,6 +720,18 @@ function selectCircularLinkTypes(inputGraph, id) {
       }
       // else keep the type assigned earlier (for nodes with only self-links)
     }
+  });
+
+  // Final override hook (debug / advanced usage):
+  // If the input link object has `_forceCircularLinkType` set to "top" or "bottom",
+  // respect it. This is intentionally opt-in and uses an underscore-prefixed field to
+  // avoid collisions with user data.
+  graph.links.forEach(function (link) {
+    if (!link || !link.circular) return;
+    if (link._forceCircularLinkType !== "top" && link._forceCircularLinkType !== "bottom") return;
+    link.circularLinkType = link._forceCircularLinkType;
+    link._forcedCircularLinkType = link._forceCircularLinkType;
+    trace(link, "final/forced-by-link-flag");
   });
 
   return graph;

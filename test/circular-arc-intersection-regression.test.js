@@ -209,13 +209,12 @@ function minDistance(aPts, bPts) {
   return Math.sqrt(best);
 }
 
-test("regression: autosearch→search ● should not intersect sosisa ●→saved_filters_search ● (top circular arc)", () => {
+test("regression: autosearch→search ● should not intersect sosisa ●→saved_filters_search ● (circular arcs)", () => {
   const chart = makeChart();
   const a = chart.graph.links.find(
     (l) =>
       l.circular &&
       !l.isVirtual &&
-      l.circularLinkType === "top" &&
       l.source?.name === "autosearch" &&
       l.target?.name === "search ●"
   );

@@ -233,7 +233,7 @@ test("local span=1 bottom circular link does not use column-wide group baseline 
   );
 });
 
-test("top span=1 search_loop stays aligned with its target-column bundle baseline (no drift) (full test-debug.html)", () => {
+test("span=1 search_loop stays aligned with the correct baseline (no drift) (full test-debug.html)", () => {
   // Use the FULL fixture (same as in the booking regression) to match the reported DOM case.
   const debugHtml = fs.readFileSync(path.join(__dirname, "..", "test-debug.html"), "utf8");
   const nodesMatch = debugHtml.match(/\b(?:let|const)\s+nodes\s*=\s*(\[[\s\S]*?\]);/);
@@ -290,33 +290,51 @@ test("top span=1 search_loop stays aligned with its target-column bundle baselin
     (x) =>
       x.circular &&
       !x.isVirtual &&
-      x.circularLinkType === "top" &&
       x.type === "search_loop" &&
       x.source?.name === "autosearch" &&
       x.target?.name === "search ●"
   );
-  assert.ok(l, "Missing TOP link autosearch → search ● (search_loop)");
+  assert.ok(l, "Missing circular link autosearch → search ● (search_loop)");
 
   const c = l.circularPathData;
   assert.ok(typeof c.groupMinY === "number", "Expected groupMinY");
+  assert.ok(typeof c.groupMaxY === "number", "Expected groupMaxY");
   assert.ok(typeof c._extMinY === "number", "Expected _extMinY");
+  assert.ok(typeof c._extMaxY === "number", "Expected _extMaxY");
   assert.ok(typeof c.verticalFullExtent === "number", "Expected verticalFullExtent");
   assert.ok(typeof c.baseOffset === "number", "Expected baseOffset");
   assert.ok(typeof c.verticalBuffer === "number", "Expected verticalBuffer");
 
-  // For TOP links: vfe = baselineMinY - (baseOffset + vBuf)  => baselineMinY = vfe + baseOffset + vBuf
-  const baselineMinY = c.verticalFullExtent + c.baseOffset + c.verticalBuffer;
-  assert.ok(
-    Math.abs(baselineMinY - c.groupMinY) < 1e-3,
-    `Expected TOP span=1 search_loop to use groupMinY baseline: baselineMinY=${baselineMinY.toFixed(2)} groupMinY=${c.groupMinY.toFixed(2)}`
-  );
-  // NOTE: In some fixtures the group's minimum Y can coincide with this link's own extMinY.
-  // The invariant we care about is baselineMinY === groupMinY; we do NOT require it to differ from _extMinY.
-  if (Math.abs(c.groupMinY - c._extMinY) > 1e-3) {
+  if (l.circularLinkType === "top") {
+    // For TOP links: vfe = baselineMinY - (baseOffset + vBuf)  => baselineMinY = vfe + baseOffset + vBuf
+    const baselineMinY = c.verticalFullExtent + c.baseOffset + c.verticalBuffer;
     assert.ok(
-      Math.abs(baselineMinY - c._extMinY) > 1e-3,
-      `Expected TOP span=1 search_loop NOT to use _extMinY baseline when groupMinY differs: baselineMinY=${baselineMinY.toFixed(2)} extMinY=${c._extMinY.toFixed(2)} groupMinY=${c.groupMinY.toFixed(2)}`
+      Math.abs(baselineMinY - c.groupMinY) < 1e-3,
+      `Expected TOP span=1 search_loop to use groupMinY baseline: baselineMinY=${baselineMinY.toFixed(2)} groupMinY=${c.groupMinY.toFixed(2)}`
     );
+    // NOTE: In some fixtures the group's minimum Y can coincide with this link's own extMinY.
+    // The invariant we care about is baselineMinY === groupMinY; we do NOT require it to differ from _extMinY.
+    if (Math.abs(c.groupMinY - c._extMinY) > 1e-3) {
+      assert.ok(
+        Math.abs(baselineMinY - c._extMinY) > 1e-3,
+        `Expected TOP span=1 search_loop NOT to use _extMinY baseline when groupMinY differs: baselineMinY=${baselineMinY.toFixed(2)} extMinY=${c._extMinY.toFixed(2)} groupMinY=${c.groupMinY.toFixed(2)}`
+      );
+    }
+  } else {
+    // For BOTTOM links: vfe = baselineMaxY + (baseOffset + vBuf) => baselineMaxY = vfe - baseOffset - vBuf
+    const baselineMaxY = c.verticalFullExtent - c.baseOffset - c.verticalBuffer;
+
+    // For span=1 backward links we want the baseline to be LOCAL (extMaxY), not the whole column's groupMaxY.
+    assert.ok(
+      Math.abs(baselineMaxY - c._extMaxY) < 1e-3,
+      `Expected BOTTOM span=1 search_loop to use _extMaxY baseline: baselineMaxY=${baselineMaxY.toFixed(2)} extMaxY=${c._extMaxY.toFixed(2)}`
+    );
+    if (Math.abs(c.groupMaxY - c._extMaxY) > 1e-3) {
+      assert.ok(
+        Math.abs(baselineMaxY - c.groupMaxY) > 1e-3,
+        `Expected BOTTOM span=1 search_loop NOT to use groupMaxY when it differs: baselineMaxY=${baselineMaxY.toFixed(2)} groupMaxY=${c.groupMaxY.toFixed(2)} extMaxY=${c._extMaxY.toFixed(2)}`
+      );
+    }
   }
 });
 
@@ -344,6 +362,37 @@ test("top backlinks are grouped by target: no interleaving between search ○ an
 
   assertTargetBlock("search ◐");
   assertTargetBlock("search ○");
+});
+
+test("top bundle ordering: listing ○→search ○ should not sink below sosisa ●→search ◐ when their top shelves overlap", () => {
+  const chart = makeChart();
+
+  const a = chart.graph.links.find((l) => l.source?.name === "listing ○" && l.target?.name === "search ○");
+  const b = chart.graph.links.find((l) => l.source?.name === "sosisa ●" && l.target?.name === "search ◐");
+  assert.ok(a && b, "Missing expected links listing ○→search ○ and/or sosisa ●→search ◐");
+  assert.ok(a.circular && b.circular, "Expected both links to be circular");
+  assert.equal(a.circularLinkType, "top");
+  assert.equal(b.circularLinkType, "top");
+
+  function shelf(link) {
+    const c = link.circularPathData;
+    assert.ok(c, "Missing circularPathData");
+    const x1 = Math.min(c.leftInnerExtent, c.rightInnerExtent);
+    const x2 = Math.max(c.leftInnerExtent, c.rightInnerExtent);
+    return { vfe: c.verticalFullExtent, x1, x2 };
+  }
+
+  const sa = shelf(a);
+  const sb = shelf(b);
+  const xOverlap = Math.max(0, Math.min(sa.x2, sb.x2) - Math.max(sa.x1, sb.x1));
+  assert.ok(xOverlap > 1e-6, "Expected top shelves to overlap in X for this regression case");
+
+  // For TOP links, smaller verticalFullExtent means the shelf is higher (closer to the top).
+  // The search ○ bundle should not be placed below the search ◐ bundle in this fixture.
+  assert.ok(
+    sa.vfe <= sb.vfe + 1e-3,
+    `Expected listing ○→search ○ (vfe=${sa.vfe.toFixed(6)}) to be no lower than sosisa ●→search ◐ (vfe=${sb.vfe.toFixed(6)})`
+  );
 });
 
 test("top circular links into the same target node maintain minimum gap (saved_filters_search ●, full fixture)", () => {
