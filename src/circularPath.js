@@ -2299,6 +2299,7 @@ export function addCircularPathData(
         // (that can break right-leg min-length). Instead, push the deeper anchor(s) DOWN until the
         // constraint is satisfied.
         if (outerVfe > maxAllowedOuterVfe + 1e-12) {
+          var changedDeepers = false;
           for (var dj2 = 0; dj2 < deepers.length; dj2++) {
             var d2 = deepers[dj2];
             var cD2 = d2 && d2.circularPathData;
@@ -2312,11 +2313,231 @@ export function addCircularPathData(
             var deltaD2 = minD2Vfe - d2Vfe;
             cD2.verticalFullExtent += deltaD2;
             if (typeof cD2.verticalBuffer === "number") cD2.verticalBuffer += deltaD2;
+            changedDeepers = true;
+          }
+
+          // After pushing deepers down, ensure deepers remain vertically separated among themselves.
+          // Otherwise a pushed span=2 deeper (e.g. schedule ○→search ●) can collide with a deeper span=4
+          // link (e.g. schedule ●→search ●) in the same target node.
+          if (changedDeepers && deepers.length > 1) {
+            var deepersSorted = deepers.slice().filter(function (d) {
+              return d && d.circularPathData && typeof d.circularPathData.verticalFullExtent === "number";
+            });
+            deepersSorted.sort(function (a, b) {
+              return a.circularPathData.verticalFullExtent - b.circularPathData.verticalFullExtent;
+            });
+
+            function shelfX(link) {
+              var cX = link.circularPathData;
+              var x1 = Math.min(cX.leftInnerExtent, cX.rightInnerExtent);
+              var x2 = Math.max(cX.leftInnerExtent, cX.rightInnerExtent);
+              return { x1: x1, x2: x2 };
+            }
+
+            for (var di2 = 1; di2 < deepersSorted.length; di2++) {
+              var prevD = deepersSorted[di2 - 1];
+              var currD = deepersSorted[di2];
+              var prevC = prevD.circularPathData;
+              var currC = currD.circularPathData;
+              if (!prevC || !currC) continue;
+
+              var ax = shelfX(prevD);
+              var bx = shelfX(currD);
+              var xOv = Math.max(0, Math.min(ax.x2, bx.x2) - Math.max(ax.x1, bx.x1));
+              if (xOv <= 1e-6) continue;
+
+              var prevBottom = prevC.verticalFullExtent + (prevD.width || 0) / 2;
+              var currTop = currC.verticalFullExtent - (currD.width || 0) / 2;
+              var needGap = pullDownGap + epsPull;
+              var gapNow = currTop - prevBottom;
+              if (gapNow >= needGap - 1e-12) continue;
+              var deltaFix = (needGap - gapNow) + epsPull;
+              currC.verticalFullExtent += deltaFix;
+              if (typeof currC.verticalBuffer === "number") currC.verticalBuffer += deltaFix;
+            }
           }
         }
       });
     }
   } catch (ePullDown) {
+    // ignore
+  }
+
+  // Post-pass (narrow): tighten span<=1 bottom backlinks that land in a node with a BOTTOM self-loop,
+  // so they sit as close as possible to that self-loop (no extra slack beyond `circularLinkGap`).
+  //
+  // Motivation (desktop): `search ◐→search ○` was sitting noticeably lower than the self-loop
+  // `search ○→search ○` despite there being no need for extra separation.
+  //
+  // Safety clamps:
+  // - Keep min-gap to the self-loop: >= `circularLinkGap`
+  // - Do not make verticalBuffer negative (vBuf >= 0)
+  // - Do not violate right-leg min-length constraint (vfe >= sourceY + rightSmallArcRadius + rightLargeArcRadius)
+  try {
+    var tightenLoopGap = circularLinkGap || 0;
+    if (tightenLoopGap > 0) {
+      var byTargetBottomSelfLoop = new Map(); // targetNode -> selfLoopLink
+      graph.links.forEach(function (l) {
+        if (!l || !l.circular || l.isVirtual) return;
+        if (l.circularLinkType !== "bottom") return;
+        if (!l.circularPathData || typeof l.circularPathData.verticalFullExtent !== "number") return;
+        if (!l.target) return;
+        if (!selfLinking(l, id)) return;
+        // Keep only one (if multiple exist, we skip tightening to avoid unintended interactions).
+        if (byTargetBottomSelfLoop.has(l.target)) return;
+        byTargetBottomSelfLoop.set(l.target, l);
+      });
+
+      var epsTight = 1e-6;
+      byTargetBottomSelfLoop.forEach(function (loopLink, targetNode) {
+        if (!loopLink || !targetNode) return;
+        var cLoop = loopLink.circularPathData;
+        if (!cLoop) return;
+        var loopVfe = cLoop.verticalFullExtent;
+        var loopW = loopLink.width || 0;
+
+        // Consider only local bottom backlinks (span<=1) into this target node.
+        // IMPORTANT: only run this tightening when there is exactly ONE such link.
+        // If there are multiple (e.g. schedule ○→filter and filter off→filter), tightening them all
+        // toward the self-loop can collapse their mutual separation. Those cases are handled by
+        // the general bottom stacking / min-gap logic.
+        var candidates = [];
+        graph.links.forEach(function (l) {
+          if (!l || !l.circular || l.isVirtual) return;
+          if (l.circularLinkType !== "bottom") return;
+          if (l.target !== targetNode) return;
+          if (l === loopLink) return;
+          if (!l.circularPathData || typeof l.circularPathData.verticalFullExtent !== "number") return;
+          if (selfLinking(l, id)) return;
+
+          var span = Math.abs((l.source.column || 0) - (l.target.column || 0));
+          if (span > 1) return;
+          candidates.push(l);
+        });
+
+        if (candidates.length !== 1) return;
+
+        candidates.forEach(function (l) {
+
+          var c = l.circularPathData;
+          var w = l.width || 0;
+
+          // Desired: otherTop - loopBottom == tightenLoopGap
+          // otherTop = vfe - w/2
+          // loopBottom = loopVfe + loopW/2
+          // => vfe == loopVfe + loopW/2 + gap + w/2
+          var desiredVfe = loopVfe + loopW / 2 + tightenLoopGap + w / 2 + epsTight;
+
+          var currVfe = c.verticalFullExtent;
+          if (currVfe <= desiredVfe + 1e-12) return; // already tight (or tighter)
+
+          // Clamp 1: vBuf must stay >= 0 (for bottom links vfe = baseY + baseOffset + vBuf).
+          var currVBuf = typeof c.verticalBuffer === "number" ? c.verticalBuffer : null;
+          var maxUpByVBuf = currVBuf != null ? currVBuf : 0;
+
+          // Clamp 2: right-leg min-length (same as the earlier pass)
+          // vfe >= sourceY + rightSmallArcRadius + rightLargeArcRadius
+          var minVfeLeg = -Infinity;
+          if (
+            typeof c.sourceY === "number" &&
+            typeof c.rightSmallArcRadius === "number" &&
+            typeof c.rightLargeArcRadius === "number"
+          ) {
+            minVfeLeg = c.sourceY + c.rightSmallArcRadius + c.rightLargeArcRadius + epsTight;
+          }
+
+          var targetVfe = Math.max(desiredVfe, minVfeLeg);
+          if (targetVfe >= currVfe - 1e-12) return;
+
+          var deltaUp = currVfe - targetVfe;
+          // apply vBuf clamp
+          if (maxUpByVBuf != null && deltaUp > maxUpByVBuf) deltaUp = maxUpByVBuf;
+          if (deltaUp <= 1e-12) return;
+
+          c.verticalFullExtent -= deltaUp;
+          if (typeof c.verticalBuffer === "number") c.verticalBuffer -= deltaUp;
+        });
+      });
+    }
+  } catch (eTightSelf) {
+    // ignore
+  }
+
+  // Final safety pass (bottom only): ensure that no two BOTTOM circular links have overlapping
+  // bottom shelves when their inner shelf X-ranges overlap.
+  //
+  // Motivation: some narrow post-passes can adjust VFE without going through the main
+  // calcVerticalBuffer stacking, and `circularLinksActuallyCross` heuristics can miss cases where
+  // two shelves overlap in X. This pass is intentionally conservative: it only pushes links DOWN
+  // (increasing VFE) to satisfy `circularLinkGap`.
+  try {
+    var finalBottomGap = circularLinkGap || 0;
+    if (finalBottomGap > 0) {
+      var epsFinal = 1e-6;
+      var bottomAll = graph.links.filter(function (l) {
+        return (
+          l &&
+          l.circular &&
+          !l.isVirtual &&
+          l.circularLinkType === "bottom" &&
+          l.circularPathData &&
+          typeof l.circularPathData.verticalFullExtent === "number"
+        );
+      });
+
+      function shelfX(link) {
+        var cX = link.circularPathData;
+        var x1 = Math.min(cX.leftInnerExtent, cX.rightInnerExtent);
+        var x2 = Math.max(cX.leftInnerExtent, cX.rightInnerExtent);
+        return { x1: x1, x2: x2 };
+      }
+
+      var maxFinalIters = 6;
+      for (var itFinal = 0; itFinal < maxFinalIters; itFinal++) {
+        var changedFinal = false;
+        // innermost first
+        bottomAll.sort(function (a, b) {
+          return a.circularPathData.verticalFullExtent - b.circularPathData.verticalFullExtent;
+        });
+
+        for (var iF = 0; iF < bottomAll.length; iF++) {
+          var curr = bottomAll[iF];
+          var cCurr = curr.circularPathData;
+          var currVfe = cCurr.verticalFullExtent;
+          var currW = curr.width || 0;
+          var currX = shelfX(curr);
+
+          // Find the strongest constraint among all previous links that overlap in X.
+          var minAllowedVfe = currVfe;
+          for (var jF = 0; jF < iF; jF++) {
+            var prev = bottomAll[jF];
+            var cPrev = prev.circularPathData;
+            var prevX = shelfX(prev);
+            var xOv = Math.max(0, Math.min(currX.x2, prevX.x2) - Math.max(currX.x1, prevX.x1));
+            if (xOv <= 1e-6) continue;
+
+            var prevVfe = cPrev.verticalFullExtent;
+            var prevW = prev.width || 0;
+
+            // Need: currTop - prevBottom >= gap
+            // => currVfe - currW/2 >= prevVfe + prevW/2 + gap
+            // => currVfe >= prevVfe + (prevW+currW)/2 + gap
+            var need = prevVfe + (prevW + currW) / 2 + finalBottomGap + epsFinal;
+            if (need > minAllowedVfe) minAllowedVfe = need;
+          }
+
+          if (minAllowedVfe > currVfe + 1e-12) {
+            var delta = minAllowedVfe - currVfe;
+            cCurr.verticalFullExtent += delta;
+            if (typeof cCurr.verticalBuffer === "number") cCurr.verticalBuffer += delta;
+            changedFinal = true;
+          }
+        }
+
+        if (!changedFinal) break;
+      }
+    }
+  } catch (eFinalBottom) {
     // ignore
   }
 

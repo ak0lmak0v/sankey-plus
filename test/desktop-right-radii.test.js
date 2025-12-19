@@ -214,6 +214,30 @@ test("desktop: search ◐→search ○ stays compact (no huge sideways push)", (
   }
 });
 
+test("desktop: search ◐→search ○ should sit close to search ○→search ○ (no extra slack beyond circularGap)", () => {
+  const chart = makeDesktopChart();
+  const gap = chart.config.links.circularGap || 0;
+
+  const loop = chart.graph.links.find((l) => l.source?.name === "search ○" && l.target?.name === "search ○");
+  const in1 = chart.graph.links.find((l) => l.source?.name === "search ◐" && l.target?.name === "search ○");
+  assert.ok(loop && in1, "Missing expected desktop links (search self-loop / search ◐→search ○)");
+  assert.ok(loop.circular && in1.circular, "Expected both links to be circular");
+  assert.equal(loop.circularLinkType, "bottom");
+  assert.equal(in1.circularLinkType, "bottom");
+  assert.ok(loop.circularPathData && in1.circularPathData, "Missing circularPathData");
+
+  const loopBottomEdge = loop.circularPathData.verticalFullExtent + (loop.width || 0) / 2;
+  const in1TopEdge = in1.circularPathData.verticalFullExtent - (in1.width || 0) / 2;
+  const gapNow = in1TopEdge - loopBottomEdge;
+
+  // Must keep at least circularGap, but should not leave a large extra "hole".
+  assert.ok(gapNow >= gap - 1e-6, `Expected gap>=${gap.toFixed(3)}; got ${gapNow.toFixed(3)}`);
+  assert.ok(
+    gapNow <= gap + 0.25,
+    `Expected gap<=${(gap + 0.25).toFixed(3)}; got ${gapNow.toFixed(3)}`
+  );
+});
+
 test("desktop: filter→listing ○ should not overlap filter→saved_filters_search ● on the right leg", () => {
   const chart = makeDesktopChart();
   const gap = 1;
