@@ -2587,12 +2587,19 @@ class SankeyChart {
           .style("stroke-opacity", (linkData, i) => {
             const linkIdx = linkData.index !== undefined ? linkData.index : i;
             return connectedLinkIndices.has(linkIdx) ? linkOpacity : dimOpacity;
+          })
+          .style("pointer-events", (linkData, i) => {
+            const linkIdx = linkData.index !== undefined ? linkData.index : i;
+            return connectedLinkIndices.has(linkIdx) ? "auto" : "none";
           });
         
         // Dim all nodes, highlight connected ones
         g.selectAll(".nodes g rect")
           .style("opacity", nodeData => 
             connectedNodeNames.has(nodeData.name) ? nodeOpacity : dimOpacity
+          )
+          .style("pointer-events", nodeData => 
+            connectedNodeNames.has(nodeData.name) ? "auto" : "none"
           );
         g.selectAll(".nodes g text:not(.node-flow-label)")
           .style("opacity", nodeData => 
@@ -2660,11 +2667,13 @@ class SankeyChart {
         scheduleLabelHide(() => {
           // Restore all links
           g.selectAll(".sankey-link")
-            .style("stroke-opacity", linkOpacity);
+            .style("stroke-opacity", linkOpacity)
+            .style("pointer-events", "auto");
           
           // Restore all nodes
           g.selectAll(".nodes g rect")
-            .style("opacity", nodeOpacity);
+            .style("opacity", nodeOpacity)
+            .style("pointer-events", "auto");
           // Restore node labels (but NOT flow stats labels)
           g.selectAll(".nodes g text:not(.node-flow-label)")
             .style("opacity", 1);
@@ -2817,16 +2826,20 @@ class SankeyChart {
 
         // Dim all links
         g.selectAll(".sankey-link")
-          .style("stroke-opacity", dimOpacity);
+          .style("stroke-opacity", dimOpacity)
+          .style("pointer-events", "none");
         
         // Dim all nodes
         g.selectAll(".nodes g rect")
-          .style("opacity", dimOpacity);
+          .style("opacity", dimOpacity)
+          .style("pointer-events", "none");
         g.selectAll(".nodes g text:not(.node-flow-label)")
           .style("opacity", dimOpacity);
         
         // Highlight hovered link
-        select(this).style("stroke-opacity", normalLinkOpacity);
+        select(this)
+          .style("stroke-opacity", normalLinkOpacity)
+          .style("pointer-events", "auto");
         
         // Show labels for this link (and its siblings if virtualized)
         // We need to match the data bound to labels
@@ -2858,7 +2871,8 @@ class SankeyChart {
             );
           })
           .selectAll("rect")
-          .style("opacity", normalNodeOpacity);
+          .style("opacity", normalNodeOpacity)
+          .style("pointer-events", "auto");
         g.selectAll(".nodes g")
           .filter((nodeData) => {
             return (
@@ -2876,11 +2890,13 @@ class SankeyChart {
       .on("mouseleave", function() {
         // Restore all links
         g.selectAll(".sankey-link")
-          .style("stroke-opacity", normalLinkOpacity);
+          .style("stroke-opacity", normalLinkOpacity)
+          .style("pointer-events", "auto");
         
         // Restore all nodes
         g.selectAll(".nodes g rect")
-          .style("opacity", normalNodeOpacity);
+          .style("opacity", normalNodeOpacity)
+          .style("pointer-events", "auto");
         g.selectAll(".nodes g text:not(.node-flow-label)")
           .style("opacity", 1);
           
