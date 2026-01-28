@@ -2395,12 +2395,29 @@ class SankeyChart {
       .append("g")
       .attr("class", "link-label-group")
       .style("opacity", 0)
-      .style("transition", "opacity 0.3s ease");
+      .style("transition", "opacity 0.1s ease");
 
     // Avoid flicker on node mouseleave:
     // We fade labels out (opacity transition) and only THEN reset their text/anchor positions.
     // Otherwise, the immediate reset can be visible for a single frame while opacity > 0.
     let pendingLabelResetTimer = null;
+    let pendingLabelHideTimer = null;
+    
+    const cancelPendingLabelHide = () => {
+      if (pendingLabelHideTimer != null) {
+        try { clearTimeout(pendingLabelHideTimer); } catch (e) { /* ignore */ }
+        pendingLabelHideTimer = null;
+      }
+    };
+    
+    const scheduleLabelHide = (callback) => {
+      cancelPendingLabelHide();
+      pendingLabelHideTimer = setTimeout(() => {
+        pendingLabelHideTimer = null;
+        callback();
+      }, 50); // small delay to allow transition to link
+    };
+    
     const scheduleLabelResetAfterFade = () => {
       if (pendingLabelResetTimer != null) {
         try { clearTimeout(pendingLabelResetTimer); } catch (e) { /* ignore */ }
@@ -2415,7 +2432,7 @@ class SankeyChart {
         // Reset any hover-time Y overrides
         linkLabels.select(".link-label-source").attr("y", l => _linkLabelAnchorY(l, "source", "below"));
         linkLabels.select(".link-label-target").attr("y", l => _linkLabelAnchorY(l, "target", "below"));
-      }, 310); // slightly > 0.3s transition
+      }, 120); // slightly > 0.1s transition
     };
 
     // Source label (For Backlinks)
@@ -2524,6 +2541,8 @@ class SankeyChart {
     
     node
       .on("mouseenter", function(event, d) {
+        // Cancel any pending hide from previous mouseleave
+        cancelPendingLabelHide();
         if (pendingLabelResetTimer != null) {
           try { clearTimeout(pendingLabelResetTimer); } catch (e) { /* ignore */ }
           pendingLabelResetTimer = null;
@@ -2575,7 +2594,7 @@ class SankeyChart {
           .style("opacity", nodeData => 
             connectedNodeNames.has(nodeData.name) ? nodeOpacity : dimOpacity
           );
-        g.selectAll(".nodes g text")
+        g.selectAll(".nodes g text:not(.node-flow-label)")
           .style("opacity", nodeData => 
             connectedNodeNames.has(nodeData.name) ? 1 : dimOpacity
           );
@@ -2635,24 +2654,67 @@ class SankeyChart {
           .text(`${incoming}→${outgoing}`);
       })
       .on("mouseleave", function() {
-        // Restore all links
-        g.selectAll(".sankey-link")
-          .style("stroke-opacity", linkOpacity);
+        const nodeEl = this;
         
-        // Restore all nodes
-        g.selectAll(".nodes g rect")
-          .style("opacity", nodeOpacity);
-        g.selectAll(".nodes g text")
-          .style("opacity", 1);
+        // Use delayed hide to avoid flicker when moving to a link
+        scheduleLabelHide(() => {
+          // Restore all links
+          g.selectAll(".sankey-link")
+            .style("stroke-opacity", linkOpacity);
           
-        // Hide all labels
-        linkLabels.style("opacity", 0);
-        scheduleLabelResetAfterFade();
+          // Restore all nodes
+          g.selectAll(".nodes g rect")
+            .style("opacity", nodeOpacity);
+          // Restore node labels (but NOT flow stats labels)
+          g.selectAll(".nodes g text:not(.node-flow-label)")
+            .style("opacity", 1);
+            
+          // Hide all link labels
+          linkLabels.style("opacity", 0);
+          scheduleLabelResetAfterFade();
 
-        // Hide flow stats label
-        select(this).select(".node-flow-label")
-          .style("opacity", 0)
-          .text("");
+          // Hide flow stats label
+          select(nodeEl).select(".node-flow-label")
+            .style("opacity", 0)
+            .text("");
+        });
+      })
+      .on("click", function(event, d) {
+        // Copy node name to clipboard on click
+        try {
+          if (event && typeof event.stopPropagation === "function") event.stopPropagation();
+        } catch (e) {
+          // ignore
+        }
+        const text = d && typeof d.name === "string" ? d.name : String(d?.name ?? "");
+
+        const writeWithFallback = (t) => {
+          if (typeof navigator !== "undefined" && navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
+            return navigator.clipboard.writeText(t);
+          }
+          return new Promise((resolve, reject) => {
+            try {
+              if (typeof document === "undefined") return reject(new Error("No document available"));
+              const ta = document.createElement("textarea");
+              ta.value = t;
+              ta.setAttribute("readonly", "");
+              ta.style.position = "fixed";
+              ta.style.opacity = "0";
+              ta.style.left = "-9999px";
+              ta.style.top = "0";
+              document.body.appendChild(ta);
+              ta.select();
+              const ok = document.execCommand && document.execCommand("copy");
+              document.body.removeChild(ta);
+              if (ok) resolve();
+              else reject(new Error("execCommand(copy) failed"));
+            } catch (e) {
+              reject(e);
+            }
+          });
+        };
+
+        writeWithFallback(text).catch(() => {});
       });
 
     var link = linkG.data(linksForDraw).enter().append("g");
@@ -2743,6 +2805,9 @@ class SankeyChart {
         writeWithFallback(text).catch(() => {});
       })
       .on("mouseenter", function(event, d) {
+        // Cancel any pending hide from node mouseleave
+        cancelPendingLabelHide();
+        
         // Ensure link-hover rules are active (in case we last hovered a node).
         linkLabels.select(".link-label-source").text(l => _linkLabelText(l, "source", "link"));
         linkLabels.select(".link-label-target").text(l => _linkLabelText(l, "target", "link"));
@@ -2757,7 +2822,7 @@ class SankeyChart {
         // Dim all nodes
         g.selectAll(".nodes g rect")
           .style("opacity", dimOpacity);
-        g.selectAll(".nodes g text")
+        g.selectAll(".nodes g text:not(.node-flow-label)")
           .style("opacity", dimOpacity);
         
         // Highlight hovered link
@@ -2767,11 +2832,18 @@ class SankeyChart {
         // We need to match the data bound to labels
         const thisLinkIndex = d.index;
         const thisParentLink = d.parentLink;
+        
+        // Disable transition to avoid flicker when switching from node hover
+        linkLabels.style("transition", "none");
         linkLabels.style("opacity", (l) => {
           if (l.index === thisLinkIndex) return 1;
           if (thisParentLink !== undefined && l.parentLink === thisParentLink) return 1;
           return 0;
         });
+        // Restore transition after a frame
+        setTimeout(() => {
+          linkLabels.style("transition", "opacity 0.1s ease");
+        }, 0);
         
         // Highlight connected nodes
         g.selectAll(".nodes g")
@@ -2798,7 +2870,7 @@ class SankeyChart {
               (d.target && nodeData.name === d.target.name)
             );
           })
-          .selectAll("text")
+          .selectAll("text:not(.node-flow-label)")
           .style("opacity", 1);
       })
       .on("mouseleave", function() {
@@ -2809,11 +2881,16 @@ class SankeyChart {
         // Restore all nodes
         g.selectAll(".nodes g rect")
           .style("opacity", normalNodeOpacity);
-        g.selectAll(".nodes g text")
+        g.selectAll(".nodes g text:not(.node-flow-label)")
           .style("opacity", 1);
           
         // Hide labels
         linkLabels.style("opacity", 0);
+        
+        // Hide any lingering node flow stats labels
+        g.selectAll(".node-flow-label")
+          .style("opacity", 0)
+          .text("");
       });
 
     link.append("title").text(function (d) {
