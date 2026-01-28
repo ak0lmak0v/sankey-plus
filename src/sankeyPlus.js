@@ -2355,6 +2355,10 @@ class SankeyChart {
     // Root group for all chart content. We'll optionally translate it in Y at the end
     // to center (and fully fit) the rendered content inside the SVG viewport.
     let g = svg.append("g").attr("transform", "translate(0,0)");
+    
+    // Store references for unlock handler
+    const gRef = g;
+    const linkLabelsRef = () => linkLabels; // Will be defined later
 
     let linkG = g
       .append("g")
@@ -2403,6 +2407,8 @@ class SankeyChart {
     let pendingLabelHideTimer = null;
     let pendingHoverTimer = null;
     let pendingRestoreTimer = null;
+    let hoverLocked = false; // When true, mouseleave won't restore state
+    let lockedHoverCallback = null; // Stores the hover effect to replay on lock
     
     const cancelPendingHover = () => {
       if (pendingHoverTimer != null) {
@@ -2418,9 +2424,15 @@ class SankeyChart {
       }
     };
     
+    const unlockHover = () => {
+      hoverLocked = false;
+      lockedHoverCallback = null;
+    };
+    
     const scheduleHover = (callback) => {
       cancelPendingHover();
       cancelPendingRestore(); // Cancel any pending restore when starting new hover
+      lockedHoverCallback = callback; // Store for potential lock
       pendingHoverTimer = setTimeout(() => {
         pendingHoverTimer = null;
         callback();
@@ -2428,6 +2440,7 @@ class SankeyChart {
     };
     
     const scheduleRestore = (callback) => {
+      if (hoverLocked) return; // Don't restore if hover is locked
       cancelPendingRestore();
       pendingRestoreTimer = setTimeout(() => {
         pendingRestoreTimer = null;
@@ -2466,6 +2479,45 @@ class SankeyChart {
         linkLabels.select(".link-label-target").attr("y", l => _linkLabelAnchorY(l, "target", "below"));
       }, 10); // small delay to batch updates
     };
+    
+    // Restore all elements to default state (used when unlocking hover)
+    const restoreAllToDefault = () => {
+      const defaultLinkOpacity = this.config.links.opacity;
+      const defaultNodeOpacity = this.config.nodes.opacity;
+      
+      // Restore all links
+      gRef.selectAll(".sankey-link")
+        .style("stroke-opacity", defaultLinkOpacity)
+        .style("pointer-events", "visibleStroke");
+      
+      // Restore all nodes
+      gRef.selectAll(".nodes g rect")
+        .style("opacity", defaultNodeOpacity)
+        .style("pointer-events", "visible");
+      gRef.selectAll(".nodes g text:not(.node-flow-label)")
+        .style("opacity", 1);
+        
+      // Hide labels
+      linkLabels.style("opacity", 0);
+      
+      // Hide node flow stats labels
+      gRef.selectAll(".node-flow-label")
+        .style("opacity", 0)
+        .text("");
+    };
+    
+    // Add transparent background rect for click-to-unlock
+    gRef.insert("rect", ":first-child")
+      .attr("width", this.config.width)
+      .attr("height", this.config.height)
+      .style("fill", "transparent")
+      .style("cursor", "default")
+      .on("click", function() {
+        if (hoverLocked) {
+          unlockHover();
+          restoreAllToDefault();
+        }
+      });
 
     // Source label (For Backlinks)
     linkLabels.append("text")
@@ -2725,12 +2777,23 @@ class SankeyChart {
         });
       })
       .on("click", function(event, d) {
-        // Copy node name to clipboard on click
         try {
           if (event && typeof event.stopPropagation === "function") event.stopPropagation();
         } catch (e) {
           // ignore
         }
+        
+        // Lock hover state on click
+        cancelPendingHover();
+        cancelPendingRestore();
+        
+        // If hover effect hasn't run yet, run it immediately
+        if (lockedHoverCallback) {
+          lockedHoverCallback();
+        }
+        hoverLocked = true;
+        
+        // Copy node name to clipboard
         const text = d && typeof d.name === "string" ? d.name : String(d?.name ?? "");
 
         const writeWithFallback = (t) => {
@@ -2802,14 +2865,23 @@ class SankeyChart {
       .style("cursor", "pointer")
       .style("pointer-events", "visibleStroke")
       .on("click", function(event, d) {
-        // Copy "{source.name} → {target.name}" to clipboard on click.
-        // Use Clipboard API when available; fall back to a hidden textarea otherwise.
         try {
           if (event && typeof event.stopPropagation === "function") event.stopPropagation();
         } catch (e) {
           // ignore
         }
+        
+        // Lock hover state on click
+        cancelPendingHover();
+        cancelPendingRestore();
+        
+        // If hover effect hasn't run yet, run it immediately
+        if (lockedHoverCallback) {
+          lockedHoverCallback();
+        }
+        hoverLocked = true;
 
+        // Copy "{source.name} → {target.name}" to clipboard
         const nameOf = (n) => {
           if (n == null) return "";
           if (typeof n === "string") return n;
@@ -2847,7 +2919,6 @@ class SankeyChart {
           });
         };
 
-        // Fire and forget; avoid breaking hover interactions.
         writeWithFallback(text).catch(() => {});
       })
       .on("mouseenter", function(event, d) {
