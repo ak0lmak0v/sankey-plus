@@ -2506,18 +2506,16 @@ class SankeyChart {
         .text("");
     };
     
-    // Add transparent background rect for click-to-unlock
-    gRef.insert("rect", ":first-child")
-      .attr("width", this.config.width)
-      .attr("height", this.config.height)
-      .style("fill", "transparent")
-      .style("cursor", "default")
-      .on("click", function() {
+    // Document-level click handler to unlock hover when clicking anywhere outside nodes/links
+    if (typeof document !== "undefined") {
+      document.addEventListener("click", function() {
         if (hoverLocked) {
           unlockHover();
           restoreAllToDefault();
         }
       });
+    }
+    
 
     // Source label (For Backlinks)
     linkLabels.append("text")
