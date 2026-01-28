@@ -2504,7 +2504,7 @@ class SankeyChart {
       })
       .attr("y", d => {
         if (d.circular && d.circularPathData) {
-            return _selfLoopLabelAnchorY(d);
+            return _selfLoopLabelAnchorY(d) + 1; // +1px visual adjustment
         }
         return 0;
       })
