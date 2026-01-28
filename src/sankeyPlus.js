@@ -2687,7 +2687,7 @@ class SankeyChart {
           // Restore all links
           g.selectAll(".sankey-link")
             .style("stroke-opacity", linkOpacity)
-            .style("pointer-events", "stroke");
+            .style("pointer-events", "visibleStroke");
           
           // Restore all nodes
           g.selectAll(".nodes g rect")
@@ -2779,10 +2779,11 @@ class SankeyChart {
         return baseClass;
       })
       .attr("d", (d) => d.path)
+      .style("fill", "none")
       .style("stroke-width", (d) => Math.max(1, d.width))
       .style("stroke", getLinkColor)
       .style("cursor", "pointer")
-      .style("pointer-events", "stroke")
+      .style("pointer-events", "visibleStroke")
       .on("click", function(event, d) {
         // Copy "{source.name} → {target.name}" to clipboard on click.
         // Use Clipboard API when available; fall back to a hidden textarea otherwise.
@@ -2862,7 +2863,7 @@ class SankeyChart {
           // Highlight hovered link
           select(linkEl)
             .style("stroke-opacity", normalLinkOpacity)
-            .style("pointer-events", "stroke");
+            .style("pointer-events", "visibleStroke");
           
           // Show labels for this link (and its siblings if virtualized)
           // We need to match the data bound to labels
@@ -2911,7 +2912,7 @@ class SankeyChart {
         // Restore all links
         g.selectAll(".sankey-link")
           .style("stroke-opacity", normalLinkOpacity)
-          .style("pointer-events", "stroke");
+          .style("pointer-events", "visibleStroke");
         
         // Restore all nodes
         g.selectAll(".nodes g rect")
