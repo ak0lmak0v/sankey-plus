@@ -2401,6 +2401,22 @@ class SankeyChart {
     // Otherwise, the immediate reset can be visible for a single frame while opacity > 0.
     let pendingLabelResetTimer = null;
     let pendingLabelHideTimer = null;
+    let pendingHoverTimer = null;
+    
+    const cancelPendingHover = () => {
+      if (pendingHoverTimer != null) {
+        try { clearTimeout(pendingHoverTimer); } catch (e) { /* ignore */ }
+        pendingHoverTimer = null;
+      }
+    };
+    
+    const scheduleHover = (callback) => {
+      cancelPendingHover();
+      pendingHoverTimer = setTimeout(() => {
+        pendingHoverTimer = null;
+        callback();
+      }, 120); // hover intent delay
+    };
     
     const cancelPendingLabelHide = () => {
       if (pendingLabelHideTimer != null) {
@@ -2538,126 +2554,132 @@ class SankeyChart {
     
     node
       .on("mouseenter", function(event, d) {
-        // Cancel any pending hide from previous mouseleave
+        // Cancel any pending operations
+        cancelPendingHover();
         cancelPendingLabelHide();
         if (pendingLabelResetTimer != null) {
           try { clearTimeout(pendingLabelResetTimer); } catch (e) { /* ignore */ }
           pendingLabelResetTimer = null;
         }
+        
+        const nodeEl = this;
         const dimOpacity = 0.1;
         
-        // Find all links connected to this node (using Set of indices for reliable comparison)
-        const connectedLinkIndices = new Set();
-        graphLinks.forEach((link, idx) => {
-          // Check both by reference and by name (in case objects differ)
-          // Also handle the case where source/target are objects with 'index' or 'name' properties
-          // For sankey-plus, source/target are usually node objects
-          
-          let sourceMatch = false;
-          let targetMatch = false;
-          
-          if (link.source === d) sourceMatch = true;
-          else if (link.source && d && link.source.index !== undefined && link.source.index === d.index) sourceMatch = true;
-          else if (link.source && d && link.source.name !== undefined && link.source.name === d.name) sourceMatch = true;
-          
-          if (link.target === d) targetMatch = true;
-          else if (link.target && d && link.target.index !== undefined && link.target.index === d.index) targetMatch = true;
-          else if (link.target && d && link.target.name !== undefined && link.target.name === d.name) targetMatch = true;
-          
-          if (sourceMatch || targetMatch) {
-            connectedLinkIndices.add(link.index !== undefined ? link.index : idx);
-          }
-        });
-        
-        // Find all connected nodes (by name for reliable matching)
-        const connectedNodeNames = new Set([d.name]);
-        graphLinks.forEach((link, idx) => {
-          const linkIdx = link.index !== undefined ? link.index : idx;
-          if (connectedLinkIndices.has(linkIdx)) {
-            if (link.source && link.source.name) connectedNodeNames.add(link.source.name);
-            if (link.target && link.target.name) connectedNodeNames.add(link.target.name);
-          }
-        });
-        
-        // Dim all links, highlight connected ones
-        g.selectAll(".sankey-link")
-          .style("stroke-opacity", (linkData, i) => {
-            const linkIdx = linkData.index !== undefined ? linkData.index : i;
-            return connectedLinkIndices.has(linkIdx) ? linkOpacity : dimOpacity;
-          })
-          .style("pointer-events", (linkData, i) => {
-            const linkIdx = linkData.index !== undefined ? linkData.index : i;
-            return connectedLinkIndices.has(linkIdx) ? "stroke" : "none";
-          });
-        
-        // Dim all nodes, highlight connected ones
-        g.selectAll(".nodes g rect")
-          .style("opacity", nodeData => 
-            connectedNodeNames.has(nodeData.name) ? nodeOpacity : dimOpacity
-          )
-          .style("pointer-events", nodeData => 
-            connectedNodeNames.has(nodeData.name) ? "visible" : "none"
-          );
-        g.selectAll(".nodes g text:not(.node-flow-label)")
-          .style("opacity", nodeData => 
-            connectedNodeNames.has(nodeData.name) ? 1 : dimOpacity
-          );
-        
-        // Show labels for connected links
-        linkLabels.style("opacity", (l, i) => {
-          const linkIdx = l.index !== undefined ? l.index : i;
-          return connectedLinkIndices.has(linkIdx) ? 1 : 0;
-        });
-
-        // Node-hover mode: show % at SOURCE end for connected links (and keep self-loop label inside).
-        linkLabels.select(".link-label-source").text(l => _linkLabelText(l, "source", "node", d));
-        linkLabels.select(".link-label-target").text(l => _linkLabelText(l, "target", "node", d));
-        linkLabels.select(".link-label-self").text(l => _linkLabelText(l, "self", "node", d));
-
-        // Small special-case: incoming backlinks from sosisa ◐ into schedule ◐ / schedule ●
-        // when shown at TARGET end on node-hover can overlap the circular arc or a nearby node title.
-        // Put the % above the link stroke at the target end for those specific links.
-        linkLabels.select(".link-label-target")
-          .attr("y", function(l) {
-            const base = _linkLabelAnchorY(l, "target", "below");
-            const txt = this.textContent;
-            if (!txt) return base;
-            if (l && l.circular && l.source && l.target) {
-              const s = l.source.name;
-              const t = l.target.name;
-              const needsAbove =
-                // sosisa ◐ -> schedule ◐/● (bottom circular)
-                (l.circularLinkType === "bottom" && s === "sosisa ◐" && (t === "schedule ◐" || t === "schedule ●")) ||
-                // schedule ○ -> search ◐/● (circular arcs; keep percent above the arc)
-                (s === "schedule ○" && (t === "search ◐" || t === "search ●"));
-
-              if (needsAbove) return _linkLabelAnchorY(l, "target", "above");
+        scheduleHover(() => {
+          // Find all links connected to this node (using Set of indices for reliable comparison)
+          const connectedLinkIndices = new Set();
+          graphLinks.forEach((link, idx) => {
+            // Check both by reference and by name (in case objects differ)
+            // Also handle the case where source/target are objects with 'index' or 'name' properties
+            // For sankey-plus, source/target are usually node objects
+            
+            let sourceMatch = false;
+            let targetMatch = false;
+            
+            if (link.source === d) sourceMatch = true;
+            else if (link.source && d && link.source.index !== undefined && link.source.index === d.index) sourceMatch = true;
+            else if (link.source && d && link.source.name !== undefined && link.source.name === d.name) sourceMatch = true;
+            
+            if (link.target === d) targetMatch = true;
+            else if (link.target && d && link.target.index !== undefined && link.target.index === d.index) targetMatch = true;
+            else if (link.target && d && link.target.name !== undefined && link.target.name === d.name) targetMatch = true;
+            
+            if (sourceMatch || targetMatch) {
+              connectedLinkIndices.add(link.index !== undefined ? link.index : idx);
             }
-            return base;
+          });
+          
+          // Find all connected nodes (by name for reliable matching)
+          const connectedNodeNames = new Set([d.name]);
+          graphLinks.forEach((link, idx) => {
+            const linkIdx = link.index !== undefined ? link.index : idx;
+            if (connectedLinkIndices.has(linkIdx)) {
+              if (link.source && link.source.name) connectedNodeNames.add(link.source.name);
+              if (link.target && link.target.name) connectedNodeNames.add(link.target.name);
+            }
+          });
+          
+          // Dim all links, highlight connected ones
+          g.selectAll(".sankey-link")
+            .style("stroke-opacity", (linkData, i) => {
+              const linkIdx = linkData.index !== undefined ? linkData.index : i;
+              return connectedLinkIndices.has(linkIdx) ? linkOpacity : dimOpacity;
+            })
+            .style("pointer-events", (linkData, i) => {
+              const linkIdx = linkData.index !== undefined ? linkData.index : i;
+              return connectedLinkIndices.has(linkIdx) ? "stroke" : "none";
+            });
+          
+          // Dim all nodes, highlight connected ones
+          g.selectAll(".nodes g rect")
+            .style("opacity", nodeData => 
+              connectedNodeNames.has(nodeData.name) ? nodeOpacity : dimOpacity
+            )
+            .style("pointer-events", nodeData => 
+              connectedNodeNames.has(nodeData.name) ? "visible" : "none"
+            );
+          g.selectAll(".nodes g text:not(.node-flow-label)")
+            .style("opacity", nodeData => 
+              connectedNodeNames.has(nodeData.name) ? 1 : dimOpacity
+            );
+          
+          // Show labels for connected links
+          linkLabels.style("opacity", (l, i) => {
+            const linkIdx = l.index !== undefined ? l.index : i;
+            return connectedLinkIndices.has(linkIdx) ? 1 : 0;
           });
 
-        // Show flow stats on hover (incoming/outgoing, excluding self-loops)
-        let incoming = 0;
-        let outgoing = 0;
-        graphLinks.forEach((link) => {
-          if (link.isVirtual) return;
-          const isSelfLoop = link.source === link.target || 
-            (link.source && link.target && link.source.name === link.target.name);
-          if (isSelfLoop) return;
-          
-          const isTarget = link.target === d || 
-            (link.target && link.target.name === d.name);
-          const isSource = link.source === d || 
-            (link.source && link.source.name === d.name);
-          
-          if (isTarget) incoming += link.value || 0;
-          if (isSource) outgoing += link.value || 0;
+          // Node-hover mode: show % at SOURCE end for connected links (and keep self-loop label inside).
+          linkLabels.select(".link-label-source").text(l => _linkLabelText(l, "source", "node", d));
+          linkLabels.select(".link-label-target").text(l => _linkLabelText(l, "target", "node", d));
+          linkLabels.select(".link-label-self").text(l => _linkLabelText(l, "self", "node", d));
+
+          // Small special-case: incoming backlinks from sosisa ◐ into schedule ◐ / schedule ●
+          // when shown at TARGET end on node-hover can overlap the circular arc or a nearby node title.
+          // Put the % above the link stroke at the target end for those specific links.
+          linkLabels.select(".link-label-target")
+            .attr("y", function(l) {
+              const base = _linkLabelAnchorY(l, "target", "below");
+              const txt = this.textContent;
+              if (!txt) return base;
+              if (l && l.circular && l.source && l.target) {
+                const s = l.source.name;
+                const t = l.target.name;
+                const needsAbove =
+                  // sosisa ◐ -> schedule ◐/● (bottom circular)
+                  (l.circularLinkType === "bottom" && s === "sosisa ◐" && (t === "schedule ◐" || t === "schedule ●")) ||
+                  // schedule ○ -> search ◐/● (circular arcs; keep percent above the arc)
+                  (s === "schedule ○" && (t === "search ◐" || t === "search ●"));
+
+                if (needsAbove) return _linkLabelAnchorY(l, "target", "above");
+              }
+              return base;
+            });
+
+          // Show flow stats on hover (incoming/outgoing, excluding self-loops)
+          let incoming = 0;
+          let outgoing = 0;
+          graphLinks.forEach((link) => {
+            if (link.isVirtual) return;
+            const isSelfLoop = link.source === link.target || 
+              (link.source && link.target && link.source.name === link.target.name);
+            if (isSelfLoop) return;
+            
+            const isTarget = link.target === d || 
+              (link.target && link.target.name === d.name);
+            const isSource = link.source === d || 
+              (link.source && link.source.name === d.name);
+            
+            if (isTarget) incoming += link.value || 0;
+            if (isSource) outgoing += link.value || 0;
+          });
+          select(nodeEl).select(".node-flow-label")
+            .style("opacity", 1)
+            .text(`${incoming}→${outgoing}`);
         });
-        select(this).select(".node-flow-label")
-          .style("opacity", 1)
-          .text(`${incoming}→${outgoing}`);
       })
       .on("mouseleave", function() {
+        cancelPendingHover();
         const nodeEl = this;
         
         // Use delayed hide to avoid flicker when moving to a link
@@ -2811,74 +2833,81 @@ class SankeyChart {
         writeWithFallback(text).catch(() => {});
       })
       .on("mouseenter", function(event, d) {
-        // Cancel any pending hide from node mouseleave
+        // Cancel any pending operations
+        cancelPendingHover();
         cancelPendingLabelHide();
         
-        // Ensure link-hover rules are active (in case we last hovered a node).
-        linkLabels.select(".link-label-source").text(l => _linkLabelText(l, "source", "link"));
-        linkLabels.select(".link-label-target").text(l => _linkLabelText(l, "target", "link"));
-        linkLabels.select(".link-label-self").text(l => _linkLabelText(l, "self", "link"));
-        linkLabels.select(".link-label-source").attr("y", l => _linkLabelAnchorY(l, "source", "below"));
-        linkLabels.select(".link-label-target").attr("y", l => _linkLabelAnchorY(l, "target", "below"));
+        const linkEl = this;
+        
+        scheduleHover(() => {
+          // Ensure link-hover rules are active (in case we last hovered a node).
+          linkLabels.select(".link-label-source").text(l => _linkLabelText(l, "source", "link"));
+          linkLabels.select(".link-label-target").text(l => _linkLabelText(l, "target", "link"));
+          linkLabels.select(".link-label-self").text(l => _linkLabelText(l, "self", "link"));
+          linkLabels.select(".link-label-source").attr("y", l => _linkLabelAnchorY(l, "source", "below"));
+          linkLabels.select(".link-label-target").attr("y", l => _linkLabelAnchorY(l, "target", "below"));
 
-        // Dim all links
-        g.selectAll(".sankey-link")
-          .style("stroke-opacity", dimOpacity)
-          .style("pointer-events", "none");
-        
-        // Dim all nodes
-        g.selectAll(".nodes g rect")
-          .style("opacity", dimOpacity)
-          .style("pointer-events", "none");
-        g.selectAll(".nodes g text:not(.node-flow-label)")
-          .style("opacity", dimOpacity);
-        
-        // Highlight hovered link
-        select(this)
-          .style("stroke-opacity", normalLinkOpacity)
-          .style("pointer-events", "stroke");
-        
-        // Show labels for this link (and its siblings if virtualized)
-        // We need to match the data bound to labels
-        const thisLinkIndex = d.index;
-        const thisParentLink = d.parentLink;
-        
-        linkLabels.style("opacity", (l) => {
-          if (l.index === thisLinkIndex) return 1;
-          if (thisParentLink !== undefined && l.parentLink === thisParentLink) return 1;
-          return 0;
+          // Dim all links
+          g.selectAll(".sankey-link")
+            .style("stroke-opacity", dimOpacity)
+            .style("pointer-events", "none");
+          
+          // Dim all nodes
+          g.selectAll(".nodes g rect")
+            .style("opacity", dimOpacity)
+            .style("pointer-events", "none");
+          g.selectAll(".nodes g text:not(.node-flow-label)")
+            .style("opacity", dimOpacity);
+          
+          // Highlight hovered link
+          select(linkEl)
+            .style("stroke-opacity", normalLinkOpacity)
+            .style("pointer-events", "stroke");
+          
+          // Show labels for this link (and its siblings if virtualized)
+          // We need to match the data bound to labels
+          const thisLinkIndex = d.index;
+          const thisParentLink = d.parentLink;
+          
+          linkLabels.style("opacity", (l) => {
+            if (l.index === thisLinkIndex) return 1;
+            if (thisParentLink !== undefined && l.parentLink === thisParentLink) return 1;
+            return 0;
+          });
+          
+          // Highlight connected nodes
+          g.selectAll(".nodes g")
+            .filter((nodeData) => {
+              return (
+                nodeData === d.source ||
+                nodeData === d.target ||
+                (d.source && nodeData.index === d.source.index) ||
+                (d.target && nodeData.index === d.target.index) ||
+                (d.source && nodeData.name === d.source.name) ||
+                (d.target && nodeData.name === d.target.name)
+              );
+            })
+            .selectAll("rect")
+            .style("opacity", normalNodeOpacity)
+            .style("pointer-events", "visible");
+          g.selectAll(".nodes g")
+            .filter((nodeData) => {
+              return (
+                nodeData === d.source ||
+                nodeData === d.target ||
+                (d.source && nodeData.index === d.source.index) ||
+                (d.target && nodeData.index === d.target.index) ||
+                (d.source && nodeData.name === d.source.name) ||
+                (d.target && nodeData.name === d.target.name)
+              );
+            })
+            .selectAll("text:not(.node-flow-label)")
+            .style("opacity", 1);
         });
-        
-        // Highlight connected nodes
-        g.selectAll(".nodes g")
-          .filter((nodeData) => {
-            return (
-              nodeData === d.source ||
-              nodeData === d.target ||
-              (d.source && nodeData.index === d.source.index) ||
-              (d.target && nodeData.index === d.target.index) ||
-              (d.source && nodeData.name === d.source.name) ||
-              (d.target && nodeData.name === d.target.name)
-            );
-          })
-          .selectAll("rect")
-          .style("opacity", normalNodeOpacity)
-          .style("pointer-events", "visible");
-        g.selectAll(".nodes g")
-          .filter((nodeData) => {
-            return (
-              nodeData === d.source ||
-              nodeData === d.target ||
-              (d.source && nodeData.index === d.source.index) ||
-              (d.target && nodeData.index === d.target.index) ||
-              (d.source && nodeData.name === d.source.name) ||
-              (d.target && nodeData.name === d.target.name)
-            );
-          })
-          .selectAll("text:not(.node-flow-label)")
-          .style("opacity", 1);
       })
       .on("mouseleave", function() {
+        cancelPendingHover();
+        
         // Restore all links
         g.selectAll(".sankey-link")
           .style("stroke-opacity", normalLinkOpacity)
