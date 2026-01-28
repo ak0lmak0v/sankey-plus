@@ -2497,48 +2497,24 @@ class SankeyChart {
       .style("transition", "opacity 0.3s ease")
       .text(this.config.id);
 
+    // Flow stats label (shown on hover)
+    node
+      .append("text")
+      .attr("class", "node-flow-label")
+      .attr("x", (d) => (d.x0 + d.x1) / 2)
+      .attr("y", (d) => (d.y0 + d.y1) / 2)
+      .attr("dominant-baseline", "middle")
+      .attr("text-anchor", "middle")
+      .style("font-size", "10px")
+      .style("fill", "black")
+      .style("pointer-events", "none")
+      .style("opacity", 0)
+      .style("transition", "opacity 0.2s ease")
+      .text("");
+
     const sankeyGraph = this.graph;
     node.append("title").text(function (d) {
       return d.name;
-    });
-
-    // Copy node name on click.
-    // Attach to the group so clicking rect/text both work.
-    node.on("click", function(event, d) {
-      try {
-        if (event && typeof event.stopPropagation === "function") event.stopPropagation();
-      } catch (e) {
-        // ignore
-      }
-      const text = d && typeof d.name === "string" ? d.name : String(d?.name ?? "");
-
-      const writeWithFallback = (t) => {
-        if (typeof navigator !== "undefined" && navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
-          return navigator.clipboard.writeText(t);
-        }
-        return new Promise((resolve, reject) => {
-          try {
-            if (typeof document === "undefined") return reject(new Error("No document available"));
-            const ta = document.createElement("textarea");
-            ta.value = t;
-            ta.setAttribute("readonly", "");
-            ta.style.position = "fixed";
-            ta.style.opacity = "0";
-            ta.style.left = "-9999px";
-            ta.style.top = "0";
-            document.body.appendChild(ta);
-            ta.select();
-            const ok = document.execCommand && document.execCommand("copy");
-            document.body.removeChild(ta);
-            if (ok) resolve();
-            else reject(new Error("execCommand(copy) failed"));
-          } catch (e) {
-            reject(e);
-          }
-        });
-      };
-
-      writeWithFallback(text).catch(() => {});
     });
 
     // Node hover handlers
@@ -2636,6 +2612,27 @@ class SankeyChart {
             }
             return base;
           });
+
+        // Show flow stats on hover (incoming/outgoing, excluding self-loops)
+        let incoming = 0;
+        let outgoing = 0;
+        graphLinks.forEach((link) => {
+          if (link.isVirtual) return;
+          const isSelfLoop = link.source === link.target || 
+            (link.source && link.target && link.source.name === link.target.name);
+          if (isSelfLoop) return;
+          
+          const isTarget = link.target === d || 
+            (link.target && link.target.name === d.name);
+          const isSource = link.source === d || 
+            (link.source && link.source.name === d.name);
+          
+          if (isTarget) incoming += link.value || 0;
+          if (isSource) outgoing += link.value || 0;
+        });
+        select(this).select(".node-flow-label")
+          .style("opacity", 1)
+          .text(`${incoming}→${outgoing}`);
       })
       .on("mouseleave", function() {
         // Restore all links
@@ -2651,6 +2648,11 @@ class SankeyChart {
         // Hide all labels
         linkLabels.style("opacity", 0);
         scheduleLabelResetAfterFade();
+
+        // Hide flow stats label
+        select(this).select(".node-flow-label")
+          .style("opacity", 0)
+          .text("");
       });
 
     var link = linkG.data(linksForDraw).enter().append("g");
