@@ -2394,8 +2394,7 @@ class SankeyChart {
       .enter()
       .append("g")
       .attr("class", "link-label-group")
-      .style("opacity", 0)
-      .style("transition", "opacity 0.1s ease");
+      .style("opacity", 0);
 
     // Avoid flicker on node mouseleave:
     // We fade labels out (opacity transition) and only THEN reset their text/anchor positions.
@@ -2432,7 +2431,7 @@ class SankeyChart {
         // Reset any hover-time Y overrides
         linkLabels.select(".link-label-source").attr("y", l => _linkLabelAnchorY(l, "source", "below"));
         linkLabels.select(".link-label-target").attr("y", l => _linkLabelAnchorY(l, "target", "below"));
-      }, 120); // slightly > 0.1s transition
+      }, 10); // small delay to batch updates
     };
 
     // Source label (For Backlinks)
@@ -2503,8 +2502,7 @@ class SankeyChart {
       .style("stroke", this.config.nodes.stroke)
       .style("opacity", this.config.nodes.opacity)
       .style("cursor", "pointer")
-      .style("pointer-events", "visible")
-      .style("transition", "opacity 0.3s ease");
+      .style("pointer-events", "visible");
 
     node
       .append("text")
@@ -2512,7 +2510,6 @@ class SankeyChart {
       .attr("y", (d) => d.y0 - 8)
       .attr("dy", "0.35em")
       .attr("text-anchor", "middle")
-      .style("transition", "opacity 0.3s ease")
       .text(this.config.id);
 
     // Flow stats label (shown on hover)
@@ -2527,7 +2524,6 @@ class SankeyChart {
       .style("fill", "black")
       .style("pointer-events", "none")
       .style("opacity", 0)
-      .style("transition", "opacity 0.2s ease")
       .text("");
 
     const sankeyGraph = this.graph;
@@ -2765,7 +2761,6 @@ class SankeyChart {
       .style("stroke", getLinkColor)
       .style("cursor", "pointer")
       .style("pointer-events", "stroke")
-      .style("transition", "stroke-opacity 0.3s ease")
       .on("click", function(event, d) {
         // Copy "{source.name} → {target.name}" to clipboard on click.
         // Use Clipboard API when available; fall back to a hidden textarea otherwise.
@@ -2848,17 +2843,11 @@ class SankeyChart {
         const thisLinkIndex = d.index;
         const thisParentLink = d.parentLink;
         
-        // Disable transition to avoid flicker when switching from node hover
-        linkLabels.style("transition", "none");
         linkLabels.style("opacity", (l) => {
           if (l.index === thisLinkIndex) return 1;
           if (thisParentLink !== undefined && l.parentLink === thisParentLink) return 1;
           return 0;
         });
-        // Restore transition after a frame
-        setTimeout(() => {
-          linkLabels.style("transition", "opacity 0.1s ease");
-        }, 0);
         
         // Highlight connected nodes
         g.selectAll(".nodes g")
