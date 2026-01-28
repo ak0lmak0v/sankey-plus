@@ -2402,6 +2402,7 @@ class SankeyChart {
     let pendingLabelResetTimer = null;
     let pendingLabelHideTimer = null;
     let pendingHoverTimer = null;
+    let pendingRestoreTimer = null;
     
     const cancelPendingHover = () => {
       if (pendingHoverTimer != null) {
@@ -2410,12 +2411,28 @@ class SankeyChart {
       }
     };
     
+    const cancelPendingRestore = () => {
+      if (pendingRestoreTimer != null) {
+        try { clearTimeout(pendingRestoreTimer); } catch (e) { /* ignore */ }
+        pendingRestoreTimer = null;
+      }
+    };
+    
     const scheduleHover = (callback) => {
       cancelPendingHover();
+      cancelPendingRestore(); // Cancel any pending restore when starting new hover
       pendingHoverTimer = setTimeout(() => {
         pendingHoverTimer = null;
         callback();
       }, 120); // hover intent delay
+    };
+    
+    const scheduleRestore = (callback) => {
+      cancelPendingRestore();
+      pendingRestoreTimer = setTimeout(() => {
+        pendingRestoreTimer = null;
+        callback();
+      }, 150); // delay restore longer than hover intent to prevent flicker
     };
     
     const cancelPendingLabelHide = () => {
@@ -2682,8 +2699,8 @@ class SankeyChart {
         cancelPendingHover();
         const nodeEl = this;
         
-        // Use delayed hide to avoid flicker when moving to a link
-        scheduleLabelHide(() => {
+        // Use delayed restore to avoid flicker when moving to a connected link/node
+        scheduleRestore(() => {
           // Restore all links
           g.selectAll(".sankey-link")
             .style("stroke-opacity", linkOpacity)
@@ -2909,25 +2926,27 @@ class SankeyChart {
       .on("mouseleave", function() {
         cancelPendingHover();
         
-        // Restore all links
-        g.selectAll(".sankey-link")
-          .style("stroke-opacity", normalLinkOpacity)
-          .style("pointer-events", "visibleStroke");
-        
-        // Restore all nodes
-        g.selectAll(".nodes g rect")
-          .style("opacity", normalNodeOpacity)
-          .style("pointer-events", "visible");
-        g.selectAll(".nodes g text:not(.node-flow-label)")
-          .style("opacity", 1);
+        scheduleRestore(() => {
+          // Restore all links
+          g.selectAll(".sankey-link")
+            .style("stroke-opacity", normalLinkOpacity)
+            .style("pointer-events", "visibleStroke");
           
-        // Hide labels
-        linkLabels.style("opacity", 0);
-        
-        // Hide any lingering node flow stats labels
-        g.selectAll(".node-flow-label")
-          .style("opacity", 0)
-          .text("");
+          // Restore all nodes
+          g.selectAll(".nodes g rect")
+            .style("opacity", normalNodeOpacity)
+            .style("pointer-events", "visible");
+          g.selectAll(".nodes g text:not(.node-flow-label)")
+            .style("opacity", 1);
+            
+          // Hide labels
+          linkLabels.style("opacity", 0);
+          
+          // Hide any lingering node flow stats labels
+          g.selectAll(".node-flow-label")
+            .style("opacity", 0)
+            .text("");
+        });
       });
 
     link.append("title").text(function (d) {
