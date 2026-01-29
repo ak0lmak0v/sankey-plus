@@ -2494,16 +2494,11 @@ class SankeyChart {
       gRef.selectAll(".nodes g rect")
         .style("opacity", defaultNodeOpacity)
         .style("pointer-events", "visible");
-      gRef.selectAll(".nodes g text:not(.node-flow-label)")
+      gRef.selectAll(".nodes g text")
         .style("opacity", 1);
         
       // Hide labels
       linkLabels.style("opacity", 0);
-      
-      // Hide node flow stats labels
-      gRef.selectAll(".node-flow-label")
-        .style("opacity", 0)
-        .text("");
     };
     
     // Document-level click handler to unlock hover when clicking anywhere outside nodes/links
@@ -2595,20 +2590,6 @@ class SankeyChart {
       .attr("text-anchor", "middle")
       .text(this.config.id);
 
-    // Flow stats label (shown on hover)
-    node
-      .append("text")
-      .attr("class", "node-flow-label")
-      .attr("x", (d) => (d.x0 + d.x1) / 2)
-      .attr("y", (d) => (d.y0 + d.y1) / 2)
-      .attr("dominant-baseline", "middle")
-      .attr("text-anchor", "middle")
-      .style("font-size", "10px")
-      .style("fill", "black")
-      .style("pointer-events", "none")
-      .style("opacity", 0)
-      .text("");
-
     const sankeyGraph = this.graph;
     node.append("title").text(function (d) {
       return d.name;
@@ -2685,7 +2666,7 @@ class SankeyChart {
             .style("pointer-events", nodeData => 
               connectedNodeNames.has(nodeData.name) ? "visible" : "none"
             );
-          g.selectAll(".nodes g text:not(.node-flow-label)")
+          g.selectAll(".nodes g text")
             .style("opacity", nodeData => 
               connectedNodeNames.has(nodeData.name) ? 1 : dimOpacity
             );
@@ -2718,36 +2699,14 @@ class SankeyChart {
                   // schedule ○ -> search ◐/● (circular arcs; keep percent above the arc)
                   (s === "schedule ○" && (t === "search ◐" || t === "search ●"));
 
-                if (needsAbove) return _linkLabelAnchorY(l, "target", "above");
-              }
-              return base;
-            });
-
-          // Show flow stats on hover (incoming/outgoing, excluding self-loops)
-          let incoming = 0;
-          let outgoing = 0;
-          graphLinks.forEach((link) => {
-            if (link.isVirtual) return;
-            const isSelfLoop = link.source === link.target || 
-              (link.source && link.target && link.source.name === link.target.name);
-            if (isSelfLoop) return;
-            
-            const isTarget = link.target === d || 
-              (link.target && link.target.name === d.name);
-            const isSource = link.source === d || 
-              (link.source && link.source.name === d.name);
-            
-            if (isTarget) incoming += link.value || 0;
-            if (isSource) outgoing += link.value || 0;
+              if (needsAbove) return _linkLabelAnchorY(l, "target", "above");
+            }
+            return base;
           });
-          select(nodeEl).select(".node-flow-label")
-            .style("opacity", 1)
-            .text(`${incoming}→${outgoing}`);
         });
       })
       .on("mouseleave", function() {
         cancelPendingHover();
-        const nodeEl = this;
         
         // Use delayed restore to avoid flicker when moving to a connected link/node
         scheduleRestore(() => {
@@ -2760,18 +2719,12 @@ class SankeyChart {
           g.selectAll(".nodes g rect")
             .style("opacity", nodeOpacity)
             .style("pointer-events", "visible");
-          // Restore node labels (but NOT flow stats labels)
-          g.selectAll(".nodes g text:not(.node-flow-label)")
+          g.selectAll(".nodes g text")
             .style("opacity", 1);
             
           // Hide all link labels
           linkLabels.style("opacity", 0);
           scheduleLabelResetAfterFade();
-
-          // Hide flow stats label
-          select(nodeEl).select(".node-flow-label")
-            .style("opacity", 0)
-            .text("");
         });
       })
       .on("click", function(event, d) {
@@ -2943,7 +2896,7 @@ class SankeyChart {
           g.selectAll(".nodes g rect")
             .style("opacity", dimOpacity)
             .style("pointer-events", "none");
-          g.selectAll(".nodes g text:not(.node-flow-label)")
+          g.selectAll(".nodes g text")
             .style("opacity", dimOpacity);
           
           // Highlight hovered link
@@ -2988,7 +2941,7 @@ class SankeyChart {
                 (d.target && nodeData.name === d.target.name)
               );
             })
-            .selectAll("text:not(.node-flow-label)")
+            .selectAll("text")
             .style("opacity", 1);
         });
       })
@@ -3005,16 +2958,11 @@ class SankeyChart {
           g.selectAll(".nodes g rect")
             .style("opacity", normalNodeOpacity)
             .style("pointer-events", "visible");
-          g.selectAll(".nodes g text:not(.node-flow-label)")
+          g.selectAll(".nodes g text")
             .style("opacity", 1);
             
           // Hide labels
           linkLabels.style("opacity", 0);
-          
-          // Hide any lingering node flow stats labels
-          g.selectAll(".node-flow-label")
-            .style("opacity", 0)
-            .text("");
         });
       });
 
