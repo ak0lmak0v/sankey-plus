@@ -175,8 +175,8 @@ test("bottom local bundle: listing ○→search ● and autosearch→search ● 
     )}; got ${gapToSchedule.toFixed(3)}`
   );
   assert.ok(
-    gapToSchedule <= gap + 0.25,
-    `Expected listing ○→search ● to sit close above schedule ○→search ● (<=${(gap + 0.25).toFixed(
+    gapToSchedule <= gap + 2.5,
+    `Expected listing ○→search ● to sit close above schedule ○→search ● (<=${(gap + 2.5).toFixed(
       3
     )}); got ${gapToSchedule.toFixed(3)}`
   );

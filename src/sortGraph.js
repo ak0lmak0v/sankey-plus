@@ -498,13 +498,20 @@ export function sortTargetLinks(inputGraph, id, typeOrder, typeAccessor) {
           var w2 = link2.width || 0;
 
           if (link1.circularLinkType === "bottom") {
-            // Bottom band: preserve historical *port assignment* behavior:
-            // shorter span takes the lower ports first (ports are assigned bottom->top).
-            // Then preserve source vertical order (lower sources enter lower) without relying on link types.
+            // When leftFullExtent is available (from a prior addCircularPathData pass),
+            // sort by actual x-position of the left vertical segment to avoid crossings
+            // at the target entry point. Bottom-band ports are assigned bottom→top
+            // (first in array → bottommost). The innermost vertical (largest lfe, closest
+            // to node) should get the bottommost port, outermost (smallest lfe) → topmost.
+            // This way each vertical only rises to its own port level and horizontal
+            // entries don't cross other verticals.
+            var lfe1 = link1.circularPathData && link1.circularPathData.leftFullExtent;
+            var lfe2 = link2.circularPathData && link2.circularPathData.leftFullExtent;
+            if (typeof lfe1 === "number" && typeof lfe2 === "number" && Math.abs(lfe1 - lfe2) >= 1e-6) {
+              return lfe2 - lfe1;
+            }
             if (d1 !== d2) return d1 - d2;
             if (s1 !== s2) {
-              // bottom-band ports are assigned bottom->top; to preserve source order at the target,
-              // lower sources must take the lower ports first => sourceY DESC.
               return s2 - s1;
             }
             if (w1 !== w2) return w1 - w2;
