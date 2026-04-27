@@ -461,17 +461,11 @@ function selectCircularLinkTypes(inputGraph, id) {
     var verticalDiff = sourceCenter - targetCenter; // positive when target is above
     // Be conservative when forcing TOP: require the target to be more than ~one target-height above.
     // The older 0.75 factor was too eager and could force TOP for cases where BOTTOM is shorter and clean.
-    var targetSignificantlyAbove = verticalDiff > localThreshold * 1.0;
+    var targetSignificantlyAbove = verticalDiff > localThreshold * 0.5;
 
-    // If source is already near the bottom of the diagram, going bottom-first can be
-    // both shorter and cleaner even when the target is above.
     var nearBottom = false;
     var _dbgColBottom = undefined;
     if (link.source && typeof link.source.y1 === "number") {
-      // Use a fairly generous threshold: if the source node is already close to the bottom edge,
-      // a bottom-routed span=1 backlink can be shorter even when the target is above.
-      //
-      // Use the SOURCE COLUMN bottom (not the whole-diagram bottom).
       var colBottom = -Infinity;
       if (graph && Array.isArray(graph.nodes)) {
         for (var bi = 0; bi < graph.nodes.length; bi++) {
@@ -487,6 +481,25 @@ function selectCircularLinkTypes(inputGraph, id) {
       _dbgColBottom = colBottom;
     }
 
+    var nearTop = false;
+    var _dbgColTop = undefined;
+    if (link.source && typeof link.source.y0 === "number") {
+      var colTop = Infinity;
+      if (graph && Array.isArray(graph.nodes)) {
+        for (var ti = 0; ti < graph.nodes.length; ti++) {
+          var nnt = graph.nodes[ti];
+          if (!nnt || nnt.column !== link.source.column) continue;
+          var ny0t = typeof nnt.y0 === "number" ? nnt.y0 : Infinity;
+          if (ny0t < colTop) colTop = ny0t;
+        }
+      }
+      if (!isFinite(colTop)) colTop = link.source.y0;
+      nearTop = (link.source.y0 - colTop) < Math.max(60, localThreshold * 0.75);
+      _dbgColTop = colTop;
+    }
+
+    var effectiveNearBottom = nearBottom && !nearTop;
+
     if (link._debugCircular) {
       if (!link._debugTypeTrace) link._debugTypeTrace = [];
       link._debugTypeTrace.push({
@@ -497,15 +510,27 @@ function selectCircularLinkTypes(inputGraph, id) {
         localThreshold: localThreshold,
         targetSignificantlyAbove: targetSignificantlyAbove,
         colBottom: _dbgColBottom,
+        colTop: _dbgColTop,
         sourceY1: link.source && link.source.y1,
         nearBottom: nearBottom,
+        nearTop: nearTop,
+        effectiveNearBottom: effectiveNearBottom,
       });
     }
 
-    if (targetSignificantlyAbove && !nearBottom) {
+    var tgtVSort = link.target && typeof link.target.verticalSort === 'number' ? link.target.verticalSort : null;
+    var srcVSort = link.source && typeof link.source.verticalSort === 'number' ? link.source.verticalSort : null;
+    var userPlacedTargetAbove = (tgtVSort !== null && srcVSort !== null && tgtVSort < srcVSort);
+    var userPlacedTargetBelow = (tgtVSort !== null && srcVSort !== null && tgtVSort > srcVSort);
+
+    if (userPlacedTargetAbove || (targetSignificantlyAbove && !effectiveNearBottom)) {
       link.circularLinkType = "top";
       link._forcedCircularLinkType = "top";
       trace(link, "pass2/local-backlink/force-top");
+    } else if (userPlacedTargetBelow || !targetSignificantlyAbove) {
+      link.circularLinkType = "bottom";
+      link._forcedCircularLinkType = "bottom";
+      trace(link, "pass2/local-backlink/force-bottom");
     } else {
       link.circularLinkType = "bottom";
       link._forcedCircularLinkType = "bottom";
@@ -2333,6 +2358,7 @@ class SankeyChart {
       this.config.links.baseRadius,
       this.config.links.verticalMargin
     );
+
 
     this.graph = addVirtualPathData(
       this.graph,
