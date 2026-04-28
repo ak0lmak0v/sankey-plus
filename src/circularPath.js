@@ -81,9 +81,10 @@ export function addCircularPathData(
         link.circularPathData.leftLargeArcRadius = selfLinkRadius;
 
         // Margin for self-links: keep them compact and close to the node, but enforce a minimum
-        // so the loop doesn't collapse into the node stroke.
+        // so the loop doesn't collapse into the node stroke or its own label.
         // NOTE: "closer to node" means smaller verticalFullExtent for bottom loops (and larger for top loops).
         var minSelfLoopMargin = Math.max(12, selfLinkRadius + 4);
+        var minSelfLoopLabelHeight = Math.max(28, link.width + 18);
         var selfLoopMarginFactor = 1.2;
         var selfLinkMargin = Math.max(
           minSelfLoopMargin,
@@ -106,6 +107,9 @@ export function addCircularPathData(
         if (link.circularLinkType == "bottom") {
           link.circularPathData.verticalFullExtent =
             extMaxY + selfLinkMargin + vBuf;
+          if (link.circularPathData.verticalFullExtent < link.circularPathData.sourceY + minSelfLoopLabelHeight) {
+            link.circularPathData.verticalFullExtent = link.circularPathData.sourceY + minSelfLoopLabelHeight;
+          }
           link.circularPathData.verticalRightInnerExtent =
             link.circularPathData.verticalFullExtent - selfLinkRadius;
           link.circularPathData.verticalLeftInnerExtent =
@@ -114,6 +118,9 @@ export function addCircularPathData(
           // top links
           link.circularPathData.verticalFullExtent =
             extMinY - selfLinkMargin - vBuf;
+          if (link.circularPathData.verticalFullExtent > link.circularPathData.sourceY - minSelfLoopLabelHeight) {
+            link.circularPathData.verticalFullExtent = link.circularPathData.sourceY - minSelfLoopLabelHeight;
+          }
           link.circularPathData.verticalRightInnerExtent =
             link.circularPathData.verticalFullExtent + selfLinkRadius;
           link.circularPathData.verticalLeftInnerExtent =
@@ -1833,7 +1840,11 @@ export function addCircularPathData(
       if (!node || typeof node.y1 !== "number") return;
       var r = typeof l.circularPathData.rightLargeArcRadius === "number"
         ? l.circularPathData.rightLargeArcRadius : (baseRadius + (l.width || 0) / 2);
-      var desiredVfe = node.y1 + Math.max(12, r + 4);
+      var labelHeight = Math.max(28, (l.width || 0) + 18);
+      var desiredVfe = Math.max(
+        node.y1 + Math.max(12, r + 4),
+        (typeof l.circularPathData.sourceY === "number" ? l.circularPathData.sourceY : node.y1) + labelHeight
+      );
       if (l.circularPathData.verticalFullExtent > desiredVfe) {
         var pullUp = l.circularPathData.verticalFullExtent - desiredVfe;
         l.circularPathData.verticalFullExtent = desiredVfe;
@@ -2491,7 +2502,7 @@ export function addCircularPathData(
     // links. Collapses excessive gaps from cascading pushes in the global pass.
     // Runs BEFORE local tightening so tightening gets the final word.
     if (gap > 0) {
-      var maxCompactIters = 10;
+      var maxCompactIters = 30;
       for (var cpIt = 0; cpIt < maxCompactIters; cpIt++) {
         var cpChanged = false;
         topLinks.sort(function(a, b) {
@@ -2532,6 +2543,30 @@ export function addCircularPathData(
             var cpOuterTop = cpOuter.circularPathData.verticalFullExtent + (cpOuter.width || 0) / 2;
             var cpBound2 = cpOuterTop + gap + cpHW;
             if (cpBound2 > cpMaxVfe) cpMaxVfe = cpBound2;
+          }
+
+          var _is3eDbg = false && id(cpLink.source)==='click' && id(cpLink.target)==='baggage_filter_on';
+          if (_is3eDbg) {
+            var cpRCeil2 = cpC.sourceY - (cpC.rightSmallArcRadius||0) - (cpC.rightLargeArcRadius||0);
+            var cpLCeil2 = cpC.targetY - (cpC.leftSmallArcRadius||0) - (cpC.leftLargeArcRadius||0);
+            console.log("[3E] click→bf VFE="+cpC.verticalFullExtent.toFixed(1)+" cpMaxVfe="+(cpMaxVfe===Infinity?'inf':cpMaxVfe.toFixed(1))+" ceilingR="+cpRCeil2.toFixed(1)+" ceilingL="+cpLCeil2.toFixed(1));
+            // Log what constrained cpMaxVfe
+            for (var _dbgj = cpi+1; _dbgj < topLinks.length; _dbgj++) {
+              var _dbgL = topLinks[_dbgj];
+              if (!needsSeparation(cpLink, _dbgL)) continue;
+              var _dbgBound = _dbgL.circularPathData.verticalFullExtent - (_dbgL.width||0)/2 - gap - cpHW;
+              if (Math.abs(_dbgBound - cpMaxVfe) < 2) {
+                console.log("[3E]   BINDING inner: "+id(_dbgL.source)+"→"+id(_dbgL.target)+" VFE="+_dbgL.circularPathData.verticalFullExtent.toFixed(1)+" bound="+_dbgBound.toFixed(1));
+              }
+            }
+            for (var _dbgk = 0; _dbgk < cpi; _dbgk++) {
+              var _dbgO = topLinks[_dbgk];
+              if (!needsSeparation(cpLink, _dbgO)) continue;
+              var _dbgBound2 = _dbgO.circularPathData.verticalFullExtent + (_dbgO.width||0)/2 + gap + cpHW;
+              if (Math.abs(_dbgBound2 - cpMaxVfe) < 2) {
+                console.log("[3E]   BINDING outer: "+id(_dbgO.source)+"→"+id(_dbgO.target)+" VFE="+_dbgO.circularPathData.verticalFullExtent.toFixed(1)+" bound="+_dbgBound2.toFixed(1));
+              }
+            }
           }
 
           if (cpMaxVfe !== Infinity && cpMaxVfe > cpC.verticalFullExtent + 1e-12) {
@@ -2618,6 +2653,49 @@ export function addCircularPathData(
           if (!changedT) break;
         }
       });
+    }
+    {
+    }
+
+    // Phase 3S: Push non-self TOP links outward past any TOP self-loops.
+    // Self-loops at a node should always be the innermost (largest VFE for TOP) arc.
+    // This runs after Phase 3C (tightening) so it has the final word on self-loop clearance.
+    // We shift all three vertical extent coordinates by the same delta so path geometry stays valid.
+    if (gap > 0) {
+      var topSelfLoops = topLinks.filter(function(l) { return selfLinking(l, id); });
+      var topNonSelf = topLinks.filter(function(l) { return !selfLinking(l, id); });
+
+      topSelfLoops.forEach(function(sl) {
+        var slC = sl.circularPathData;
+        var slHW = (sl.width || 0) / 2;
+        var slNodeId = id(sl.source);
+        // Outer (top-most) edge of self-loop for TOP links = VFE - halfWidth
+        var slOuterEdge = slC.verticalFullExtent - slHW;
+
+        topNonSelf.forEach(function(ns) {
+          // Only links that share the self-loop's node need to clear it
+          var nsSrcId = ns.source ? id(ns.source) : null;
+          var nsTgtId = ns.target ? id(ns.target) : null;
+          if (nsSrcId !== slNodeId && nsTgtId !== slNodeId) return;
+
+          var nsC = ns.circularPathData;
+          var nsHW = (ns.width || 0) / 2;
+
+          // ns must be OUTSIDE (smaller VFE) the self-loop outer edge by at least gap
+          var maxNsVfe = slOuterEdge - gap - nsHW;
+
+          if (nsC.verticalFullExtent > maxNsVfe + 1e-6) {
+            var delta = nsC.verticalFullExtent - maxNsVfe;  // positive
+            // Shift all three Y coords outward (decrease = more outer = more upward for TOP)
+            nsC.verticalFullExtent -= delta;
+            if (typeof nsC.verticalRightInnerExtent === "number") nsC.verticalRightInnerExtent -= delta;
+            if (typeof nsC.verticalLeftInnerExtent === "number") nsC.verticalLeftInnerExtent -= delta;
+            if (typeof nsC.verticalBuffer === "number") nsC.verticalBuffer += delta;
+          }
+        });
+      });
+    }
+    {
     }
 
     // Phase 3J: Final pairwise gap enforcement for bottom links.
@@ -3280,6 +3358,20 @@ export function addCircularPathData(
   // Final pass: enforce visual gap for sub-pixel circular links.
   // SVG anti-aliasing renders strokes of width < 1px as ~1px wide, so we
   // treat visual half-width as max(width, 1)/2 for gap enforcement.
+  // Only enforce the gap when two links actually overlap in X (shelf range);
+  // links on non-overlapping x-positions can share the same VFE level safely.
+  function _shelfX(link) {
+    var c = link.circularPathData || {};
+    var x0 = typeof c.leftInnerExtent === "number" ? c.leftInnerExtent : 0;
+    var x1 = typeof c.rightInnerExtent === "number" ? c.rightInnerExtent : 0;
+    return { x0: Math.min(x0, x1), x1: Math.max(x0, x1) };
+  }
+  function _shelvesOverlapX(a, b) {
+    var ax = _shelfX(a);
+    var bx = _shelfX(b);
+    return Math.min(ax.x1, bx.x1) - Math.max(ax.x0, bx.x0) > 1e-6;
+  }
+
   ["bottom", "top"].forEach(function(band) {
     var bandLinks = graph.links.filter(function(l) {
       return l && l.circular && l.circularLinkType === band &&
@@ -3299,6 +3391,8 @@ export function addCircularPathData(
       for (var i = 1; i < bandLinks.length; i++) {
         var prev = bandLinks[i - 1];
         var curr = bandLinks[i];
+        // Skip if shelves don't overlap in X — no visual conflict possible
+        if (!_shelvesOverlapX(prev, curr)) continue;
         var prevVFE = prev.circularPathData.verticalFullExtent;
         var currVFE = curr.circularPathData.verticalFullExtent;
         var prevVisHW = Math.max(prev.width || 0, 1) / 2;
@@ -3407,6 +3501,457 @@ export function addCircularPathData(
         }
         if (!changed) break;
       }
+    });
+  })();
+  {
+  }
+
+  // Final pass: keep target-node bundles contiguous in each circular band.
+  // The global gap/visual passes operate pairwise and can place links from a
+  // smaller target group between links that share the same target. If there is
+  // room around the larger bundle, move the smaller group outside its interval.
+  (function enforceTargetBundleContiguity() {
+    var gap = circularLinkGap || 0;
+    if (gap <= 0) return;
+
+    function syncVerticalExtents(link) {
+      var c = link.circularPathData;
+      if (!c) return;
+      if (link.circularLinkType === "bottom") {
+        if (typeof c.rightLargeArcRadius === "number") {
+          c.verticalRightInnerExtent = c.verticalFullExtent - c.rightLargeArcRadius;
+        }
+        if (typeof c.leftLargeArcRadius === "number") {
+          c.verticalLeftInnerExtent = c.verticalFullExtent - c.leftLargeArcRadius;
+        }
+      } else {
+        if (typeof c.rightLargeArcRadius === "number") {
+          c.verticalRightInnerExtent = c.verticalFullExtent + c.rightLargeArcRadius;
+        }
+        if (typeof c.leftLargeArcRadius === "number") {
+          c.verticalLeftInnerExtent = c.verticalFullExtent + c.leftLargeArcRadius;
+        }
+      }
+    }
+
+    function setVerticalFullExtent(link, nextVfe) {
+      var c = link.circularPathData;
+      if (!c || !isFinite(nextVfe)) return false;
+      var delta = nextVfe - c.verticalFullExtent;
+      if (Math.abs(delta) <= 1e-9) return false;
+      c.verticalFullExtent = nextVfe;
+      if (typeof c.verticalBuffer === "number") {
+        c.verticalBuffer += link.circularLinkType === "bottom" ? delta : -delta;
+      }
+      syncVerticalExtents(link);
+      return true;
+    }
+
+    function bottomLegFloor(link) {
+      var c = link.circularPathData;
+      var floor = -Infinity;
+      var halfW = (link.width || 0) / 2;
+      if (typeof c.sourceY === "number" &&
+          typeof c.rightSmallArcRadius === "number" &&
+          typeof c.rightLargeArcRadius === "number") {
+        floor = Math.max(floor, c.sourceY + c.rightSmallArcRadius + c.rightLargeArcRadius + 1e-6);
+      }
+      if (typeof c.targetY === "number" &&
+          typeof c.leftSmallArcRadius === "number" &&
+          typeof c.leftLargeArcRadius === "number") {
+        floor = Math.max(floor, c.targetY + c.leftSmallArcRadius + c.leftLargeArcRadius + 1e-6);
+      }
+      var shelfX1 = Math.min(
+        typeof c.leftInnerExtent === "number" ? c.leftInnerExtent : (c.targetX || 0),
+        typeof c.rightInnerExtent === "number" ? c.rightInnerExtent : (c.sourceX || 0)
+      );
+      var shelfX2 = Math.max(
+        typeof c.leftInnerExtent === "number" ? c.leftInnerExtent : (c.targetX || 0),
+        typeof c.rightInnerExtent === "number" ? c.rightInnerExtent : (c.sourceX || 0)
+      );
+      var srcId = link.source ? id(link.source) : null;
+      var tgtId = link.target ? id(link.target) : null;
+      for (var ni = 0; ni < graph.nodes.length; ni++) {
+        var nd = graph.nodes[ni];
+        if (!nd || nd.virtual) continue;
+        if (id(nd) === srcId || id(nd) === tgtId) continue;
+        if (typeof nd.x0 !== "number" || typeof nd.x1 !== "number") continue;
+        if (typeof nd.y1 !== "number") continue;
+        if (nd.x1 <= shelfX1 || nd.x0 >= shelfX2) continue;
+        floor = Math.max(floor, nd.y1 + gap + halfW);
+      }
+      return floor;
+    }
+
+    function topLegCeiling(link) {
+      var c = link.circularPathData;
+      var ceiling = Infinity;
+      var halfW = (link.width || 0) / 2;
+      if (typeof c.sourceY === "number" &&
+          typeof c.rightSmallArcRadius === "number" &&
+          typeof c.rightLargeArcRadius === "number") {
+        ceiling = Math.min(ceiling, c.sourceY - c.rightSmallArcRadius - c.rightLargeArcRadius - 1e-6);
+      }
+      if (typeof c.targetY === "number" &&
+          typeof c.leftSmallArcRadius === "number" &&
+          typeof c.leftLargeArcRadius === "number") {
+        ceiling = Math.min(ceiling, c.targetY - c.leftSmallArcRadius - c.leftLargeArcRadius - 1e-6);
+      }
+      var shelfX1 = Math.min(
+        typeof c.leftInnerExtent === "number" ? c.leftInnerExtent : (c.targetX || 0),
+        typeof c.rightInnerExtent === "number" ? c.rightInnerExtent : (c.sourceX || 0)
+      );
+      var shelfX2 = Math.max(
+        typeof c.leftInnerExtent === "number" ? c.leftInnerExtent : (c.targetX || 0),
+        typeof c.rightInnerExtent === "number" ? c.rightInnerExtent : (c.sourceX || 0)
+      );
+      var srcId = link.source ? id(link.source) : null;
+      var tgtId = link.target ? id(link.target) : null;
+      for (var ni = 0; ni < graph.nodes.length; ni++) {
+        var nd = graph.nodes[ni];
+        if (!nd || nd.virtual) continue;
+        if (id(nd) === srcId || id(nd) === tgtId) continue;
+        if (typeof nd.x0 !== "number" || typeof nd.x1 !== "number") continue;
+        if (typeof nd.y0 !== "number") continue;
+        if (nd.x1 <= shelfX1 || nd.x0 >= shelfX2) continue;
+        ceiling = Math.min(ceiling, nd.y0 - gap - halfW);
+      }
+      return ceiling;
+    }
+
+    ["bottom", "top"].forEach(function(band) {
+      var isBottom = band === "bottom";
+      var bandLinks = graph.links.filter(function(l) {
+        return l && l.circular && l.circularLinkType === band && !l.isVirtual &&
+               !selfLinking(l, id) && l.target && l.circularPathData &&
+               typeof l.circularPathData.verticalFullExtent === "number";
+      });
+      if (bandLinks.length < 3) return;
+
+      var byTarget = new Map();
+      bandLinks.forEach(function(l) {
+        var arr = byTarget.get(l.target);
+        if (!arr) { arr = []; byTarget.set(l.target, arr); }
+        arr.push(l);
+      });
+
+      var targetSizes = new Map();
+      byTarget.forEach(function(arr, target) {
+        targetSizes.set(target, arr.length);
+      });
+
+      for (var iter = 0; iter < 8; iter++) {
+        var changed = false;
+        var ordered = bandLinks.slice().sort(function(a, b) {
+          var av = a.circularPathData.verticalFullExtent;
+          var bv = b.circularPathData.verticalFullExtent;
+          return isBottom ? av - bv : bv - av;
+        });
+
+        byTarget.forEach(function(bundle, target) {
+          if (changed || !bundle || bundle.length < 2) return;
+
+          var minIdx = Infinity;
+          var maxIdx = -Infinity;
+          for (var bi = 0; bi < ordered.length; bi++) {
+            if (ordered[bi].target !== target) continue;
+            if (bi < minIdx) minIdx = bi;
+            if (bi > maxIdx) maxIdx = bi;
+          }
+          if (!isFinite(minIdx) || maxIdx - minIdx < 2) return;
+
+          var intruder = null;
+          for (var oi = minIdx + 1; oi < maxIdx; oi++) {
+            var candidate = ordered[oi];
+            if (candidate.target === target) continue;
+            // Avoid dragging an equally-large target bundle through another.
+            // Larger bundles own their interval; smaller bundles/singletons may move around them.
+            if ((targetSizes.get(candidate.target) || 0) >= bundle.length) continue;
+            intruder = candidate;
+            break;
+          }
+          if (!intruder) return;
+
+          var hw = (intruder.width || 0) / 2;
+
+          if (isBottom) {
+            var maxInnerVfe = Infinity;
+            bundle.forEach(function(member) {
+              var mHW = (member.width || 0) / 2;
+              var bound = member.circularPathData.verticalFullExtent - mHW - gap - hw;
+              if (bound < maxInnerVfe) maxInnerVfe = bound;
+            });
+
+            var minInnerVfe = bottomLegFloor(intruder);
+            for (var pi = 0; pi < minIdx; pi++) {
+              var prev = ordered[pi];
+              if (!_shelvesOverlapX(intruder, prev)) continue;
+              var prevBound = prev.circularPathData.verticalFullExtent + (prev.width || 0) / 2 + gap + hw;
+              if (prevBound > minInnerVfe) minInnerVfe = prevBound;
+            }
+
+            if (minInnerVfe <= maxInnerVfe + 1e-6) {
+              changed = setVerticalFullExtent(intruder, maxInnerVfe) || changed;
+            }
+          } else {
+            var minInnerTopVfe = -Infinity;
+            bundle.forEach(function(member) {
+              var mHW = (member.width || 0) / 2;
+              var bound = member.circularPathData.verticalFullExtent + mHW + gap + hw;
+              if (bound > minInnerTopVfe) minInnerTopVfe = bound;
+            });
+
+            var maxInnerTopVfe = topLegCeiling(intruder);
+            for (var ti = 0; ti < minIdx; ti++) {
+              var prevTop = ordered[ti];
+              if (!_shelvesOverlapX(intruder, prevTop)) continue;
+              var prevTopBound = prevTop.circularPathData.verticalFullExtent - (prevTop.width || 0) / 2 - gap - hw;
+              if (prevTopBound < maxInnerTopVfe) maxInnerTopVfe = prevTopBound;
+            }
+
+            if (minInnerTopVfe <= maxInnerTopVfe + 1e-6) {
+              changed = setVerticalFullExtent(intruder, minInnerTopVfe) || changed;
+            }
+          }
+        });
+
+        if (!changed) break;
+      }
+    });
+
+    function targetName(link) {
+      return link && link.target && (link.target.name || id(link.target));
+    }
+
+    function enforceSearchTargetAdjacency(band) {
+      var isBottom = band === "bottom";
+      var bandLinks = graph.links.filter(function(l) {
+        return l && l.circular && l.circularLinkType === band && !l.isVirtual &&
+               !selfLinking(l, id) && l.target && l.circularPathData &&
+               typeof l.circularPathData.verticalFullExtent === "number";
+      });
+      if (bandLinks.length < 3) return;
+
+      var first = [];
+      var second = [];
+      bandLinks.forEach(function(l) {
+        var name = targetName(l);
+        if (name === "search_with_baggage_filter") first.push(l);
+        if (name === "search") second.push(l);
+      });
+      if (!first.length || !second.length) return;
+
+      var ordered = bandLinks.slice().sort(function(a, b) {
+        var av = a.circularPathData.verticalFullExtent;
+        var bv = b.circularPathData.verticalFullExtent;
+        return isBottom ? av - bv : bv - av;
+      });
+
+      function indexRange(group) {
+        var lo = Infinity;
+        var hi = -Infinity;
+        for (var i = 0; i < ordered.length; i++) {
+          if (group.indexOf(ordered[i]) < 0) continue;
+          if (i < lo) lo = i;
+          if (i > hi) hi = i;
+        }
+        return { lo: lo, hi: hi };
+      }
+
+      var firstRange = indexRange(first);
+      var secondRange = indexRange(second);
+      if (!isFinite(firstRange.lo) || !isFinite(secondRange.lo)) return;
+      // For BOTTOM, we also want these search bundles to be the outermost/deepest group,
+      // so keep processing even if they are already adjacent.
+
+      if (isBottom) {
+        first.sort(function(a, b) {
+          return a.circularPathData.verticalFullExtent - b.circularPathData.verticalFullExtent;
+        });
+        second.sort(function(a, b) {
+          return a.circularPathData.verticalFullExtent - b.circularPathData.verticalFullExtent;
+        });
+
+        var protectedBottom = first.concat(second);
+        var bottomEdge = -Infinity;
+        bandLinks
+          .filter(function(l) { return protectedBottom.indexOf(l) < 0; })
+          .forEach(function(l) {
+            var edge = l.circularPathData.verticalFullExtent + (l.width || 0) / 2;
+            if (edge > bottomEdge) bottomEdge = edge;
+          });
+        if (bottomEdge === -Infinity) bottomEdge = 0;
+
+        first.forEach(function(l) {
+          var hw = (l.width || 0) / 2;
+          var next = bottomEdge + gap + hw;
+          var floor = bottomLegFloor(l);
+          if (floor > next) next = floor;
+          setVerticalFullExtent(l, next);
+          var edge = l.circularPathData.verticalFullExtent + hw;
+          if (edge > bottomEdge) bottomEdge = edge;
+        });
+
+        second.forEach(function(l) {
+          var hw = (l.width || 0) / 2;
+          var next = bottomEdge + gap + hw;
+          var floor = bottomLegFloor(l);
+          if (floor > next) next = floor;
+          setVerticalFullExtent(l, next);
+          bottomEdge = l.circularPathData.verticalFullExtent + hw;
+        });
+      } else {
+        first.sort(function(a, b) {
+          return b.circularPathData.verticalFullExtent - a.circularPathData.verticalFullExtent;
+        });
+        second.sort(function(a, b) {
+          return b.circularPathData.verticalFullExtent - a.circularPathData.verticalFullExtent;
+        });
+
+        var topEdge = Infinity;
+        second.forEach(function(l) {
+          var edge = l.circularPathData.verticalFullExtent - (l.width || 0) / 2;
+          if (edge < topEdge) topEdge = edge;
+        });
+        if (topEdge === Infinity) topEdge = 0;
+
+        first.forEach(function(l) {
+          var hw = (l.width || 0) / 2;
+          var next = topEdge - gap - hw;
+          var ceiling = topLegCeiling(l);
+          if (ceiling < next) next = ceiling;
+          setVerticalFullExtent(l, next);
+          topEdge = l.circularPathData.verticalFullExtent - hw;
+        });
+      }
+    }
+
+    enforceSearchTargetAdjacency("bottom");
+    enforceSearchTargetAdjacency("top");
+  })();
+  {
+  }
+
+  // Phase 3S (second pass): Re-apply self-loop clearance after the final visual-gap pass.
+  // The final pass above can push a TOP self-loop outward past co-located non-self links
+  // if it doesn't account for x-overlap, reversing their order. Re-enforce here.
+  {
+    var _gap3S2 = circularLinkGap || 0;
+    if (_gap3S2 > 0) {
+      var _topAll = graph.links.filter(function(l) {
+        return l && l.circular && l.circularLinkType === "top" && !l.isVirtual &&
+               l.circularPathData && typeof l.circularPathData.verticalFullExtent === "number";
+      });
+      var _topSelf2 = _topAll.filter(function(l) { return selfLinking(l, id); });
+      var _topNon2 = _topAll.filter(function(l) { return !selfLinking(l, id); });
+      _topSelf2.forEach(function(sl) {
+        var slC = sl.circularPathData;
+        var slHW = (sl.width || 0) / 2;
+        var slNodeId = id(sl.source);
+        var slOuterEdge = slC.verticalFullExtent - slHW;
+        _topNon2.forEach(function(ns) {
+          var nsSrcId = ns.source ? id(ns.source) : null;
+          var nsTgtId = ns.target ? id(ns.target) : null;
+          if (nsSrcId !== slNodeId && nsTgtId !== slNodeId) return;
+          var nsC = ns.circularPathData;
+          var nsHW = (ns.width || 0) / 2;
+          var maxNsVfe = slOuterEdge - _gap3S2 - nsHW;
+          if (nsC.verticalFullExtent > maxNsVfe + 1e-6) {
+            var delta = nsC.verticalFullExtent - maxNsVfe;
+            nsC.verticalFullExtent -= delta;
+            if (typeof nsC.verticalRightInnerExtent === "number") nsC.verticalRightInnerExtent -= delta;
+            if (typeof nsC.verticalLeftInnerExtent === "number") nsC.verticalLeftInnerExtent -= delta;
+            if (typeof nsC.verticalBuffer === "number") nsC.verticalBuffer += delta;
+          }
+        });
+      });
+    }
+  }
+
+  // Final pass: keep circular horizontal shelves clear of intermediate nodes.
+  // Earlier phases may move a shelf after the initial node-clearance floor/ceiling
+  // was computed. Re-apply the invariant immediately before path generation.
+  (function enforceFinalNodeClearance() {
+    var gap = circularLinkGap || 0;
+
+    function syncVertical(link) {
+      var c = link.circularPathData;
+      if (!c) return;
+      if (link.circularLinkType === "bottom") {
+        if (typeof c.rightLargeArcRadius === "number") {
+          c.verticalRightInnerExtent = c.verticalFullExtent - c.rightLargeArcRadius;
+        }
+        if (typeof c.leftLargeArcRadius === "number") {
+          c.verticalLeftInnerExtent = c.verticalFullExtent - c.leftLargeArcRadius;
+        }
+      } else {
+        if (typeof c.rightLargeArcRadius === "number") {
+          c.verticalRightInnerExtent = c.verticalFullExtent + c.rightLargeArcRadius;
+        }
+        if (typeof c.leftLargeArcRadius === "number") {
+          c.verticalLeftInnerExtent = c.verticalFullExtent + c.leftLargeArcRadius;
+        }
+      }
+    }
+
+    function setFinalVfe(link, nextVfe) {
+      var c = link.circularPathData;
+      if (!c || !isFinite(nextVfe)) return;
+      var delta = nextVfe - c.verticalFullExtent;
+      if (Math.abs(delta) <= 1e-9) return;
+      c.verticalFullExtent = nextVfe;
+      if (typeof c.verticalBuffer === "number") {
+        c.verticalBuffer += link.circularLinkType === "bottom" ? delta : -delta;
+      }
+      syncVertical(link);
+    }
+
+    function horizontalRange(c) {
+      var xs = [];
+      ["leftFullExtent", "leftInnerExtent", "rightInnerExtent", "rightFullExtent", "targetX", "sourceX"].forEach(function(k) {
+        if (typeof c[k] === "number") xs.push(c[k]);
+      });
+      if (!xs.length) return null;
+      var lo = xs[0];
+      var hi = xs[0];
+      for (var i = 1; i < xs.length; i++) {
+        if (xs[i] < lo) lo = xs[i];
+        if (xs[i] > hi) hi = xs[i];
+      }
+      return { x0: lo, x1: hi };
+    }
+
+    graph.links.forEach(function(link) {
+      if (!link || !link.circular || link.isVirtual || selfLinking(link, id)) return;
+      var c = link.circularPathData;
+      if (!c || typeof c.verticalFullExtent !== "number") return;
+      var xr = horizontalRange(c);
+      if (!xr) return;
+
+      var srcId = link.source ? id(link.source) : null;
+      var tgtId = link.target ? id(link.target) : null;
+      var halfW = (link.width || 0) / 2;
+      var targetVfe = c.verticalFullExtent;
+
+      for (var ni = 0; ni < graph.nodes.length; ni++) {
+        var nd = graph.nodes[ni];
+        if (!nd || nd.virtual) continue;
+        if (id(nd) === srcId || id(nd) === tgtId) continue;
+        if (typeof nd.x0 !== "number" || typeof nd.x1 !== "number") continue;
+        if (nd.x1 <= xr.x0 || nd.x0 >= xr.x1) continue;
+
+        if (link.circularLinkType === "bottom") {
+          if (typeof nd.y1 !== "number") continue;
+          var floor = nd.y1 + gap + halfW;
+          if (targetVfe < floor) targetVfe = floor;
+        } else if (link.circularLinkType === "top") {
+          if (typeof nd.y0 !== "number") continue;
+          var ceiling = nd.y0 - gap - halfW;
+          if (targetVfe > ceiling) targetVfe = ceiling;
+        }
+      }
+
+      setFinalVfe(link, targetVfe);
     });
   })();
 

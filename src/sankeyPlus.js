@@ -455,13 +455,11 @@ function selectCircularLinkTypes(inputGraph, id) {
     var tgtH = (link.target.y1 - link.target.y0) || 0;
     var localThreshold = Math.max(srcH, tgtH); // "nearby" in the same band of the diagram
 
-    // Default for span=1 backward links: BOTTOM (keeps them out of dense TOP bundles).
-    // Only force TOP when target is *clearly* above source; otherwise you can end up
-    // with visually-bottom links still participating in TOP buffering.
+    // Default for span=1 backward links: TOP when the source and target are
+    // roughly at the same level (or target is above). BOTTOM only when the
+    // target is dramatically lower — a full half-node-height below the source.
     var verticalDiff = sourceCenter - targetCenter; // positive when target is above
-    // Be conservative when forcing TOP: require the target to be more than ~one target-height above.
-    // The older 0.75 factor was too eager and could force TOP for cases where BOTTOM is shorter and clean.
-    var targetSignificantlyAbove = verticalDiff > localThreshold * 0.5;
+    var targetSignificantlyAbove = verticalDiff > localThreshold * (-0.5);
 
     var nearBottom = false;
     var _dbgColBottom = undefined;
