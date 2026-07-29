@@ -3965,13 +3965,20 @@ export function addCircularPathData(
       ];
     }
 
-    function moveRightLegOutward(link, nextRfe) {
+    function setRightLegSlot(link, nextRfe) {
       var c = link.circularPathData;
       var delta = nextRfe - c.rightFullExtent;
-      if (delta <= 1e-6) return false;
+      if (Math.abs(delta) <= 1e-6) return;
+      var minRadius = baseRadius + (link.width || 0) / 2;
+      if (c.rightLargeArcRadius + delta < minRadius) {
+        delta = minRadius - c.rightLargeArcRadius;
+      }
       c.rightLargeArcRadius += delta;
       if (typeof c.rightSmallArcRadius === "number") {
         c.rightSmallArcRadius += delta;
+        if (c.rightSmallArcRadius < minRadius) {
+          c.rightSmallArcRadius = minRadius;
+        }
         if (c.rightSmallArcRadius > c.rightLargeArcRadius) {
           c.rightSmallArcRadius = c.rightLargeArcRadius;
         }
@@ -3982,49 +3989,65 @@ export function addCircularPathData(
         link.circularLinkType === "bottom"
           ? c.verticalFullExtent - c.rightLargeArcRadius
           : c.verticalFullExtent + c.rightLargeArcRadius;
-      return true;
     }
 
     Object.keys(bySourceColumn).forEach(function(column) {
       var group = bySourceColumn[column];
       if (group.length < 2) return;
 
-      for (var iteration = 0; iteration < group.length; iteration++) {
-        var changed = false;
-        for (var i = 0; i < group.length; i++) {
-          for (var j = i + 1; j < group.length; j++) {
-            var first = group[i];
-            var second = group[j];
-            if (first.circularLinkType === second.circularLinkType) continue;
-            if (first.source === second.source) continue;
-
-            var firstSeg = rightLegSegment(first);
-            var secondSeg = rightLegSegment(second);
-            var yOverlap =
-              Math.min(firstSeg[1], secondSeg[1]) -
-              Math.max(firstSeg[0], secondSeg[0]);
-            if (yOverlap <= 1e-6) continue;
-
-            var top =
-              first.circularLinkType === "top" ? first : second;
-            var bottom = top === first ? second : first;
-            var topSpan = Math.abs(
-              (top.source && top.source.column || 0) -
-              (top.target && top.target.column || 0)
-            );
-            var inner = topSpan === 0 ? top : bottom;
-            var outer = inner === top ? bottom : top;
-            var requiredOuterRfe =
-              inner.circularPathData.rightFullExtent +
-              ((inner.width || 0) + (outer.width || 0)) / 2 +
-              gap;
-            if (moveRightLegOutward(outer, requiredOuterRfe)) {
-              changed = true;
-            }
-          }
+      var bottomBySource = new Map();
+      group.forEach(function(link) {
+        if (link.circularLinkType !== "bottom" || !link.source) return;
+        var sourceGroup = bottomBySource.get(link.source);
+        if (!sourceGroup) {
+          sourceGroup = [];
+          bottomBySource.set(link.source, sourceGroup);
         }
-        if (!changed) break;
-      }
+        sourceGroup.push(link);
+      });
+
+      bottomBySource.forEach(function(bottomBundle, sourceNode) {
+        var blockers = group.filter(function(candidate) {
+          if (candidate.circularLinkType !== "top" ||
+              candidate.source === sourceNode) return false;
+          var candidateSeg = rightLegSegment(candidate);
+          return bottomBundle.some(function(bottomLink) {
+            var bottomSeg = rightLegSegment(bottomLink);
+            return Math.min(candidateSeg[1], bottomSeg[1]) -
+              Math.max(candidateSeg[0], bottomSeg[0]) > 1e-6;
+          });
+        });
+        if (!blockers.length) return;
+
+        bottomBundle.sort(function(a, b) {
+          var aSpan = Math.abs(a.source.column - a.target.column);
+          var bSpan = Math.abs(b.source.column - b.target.column);
+          if (aSpan !== bSpan) return aSpan - bSpan;
+          return a.circularPathData.rightFullExtent -
+            b.circularPathData.rightFullExtent;
+        });
+
+        var nextInnerEdge = -Infinity;
+        blockers.forEach(function(blocker) {
+          var hw = (blocker.width || 0) / 2;
+          nextInnerEdge = Math.max(
+            nextInnerEdge,
+            blocker.circularPathData.rightFullExtent + hw
+          );
+        });
+        nextInnerEdge += gap;
+
+        bottomBundle.forEach(function(link) {
+          var hw = (link.width || 0) / 2;
+          var nextRfe = Math.max(
+            link.circularPathData.rightFullExtent,
+            nextInnerEdge + hw
+          );
+          setRightLegSlot(link, nextRfe);
+          nextInnerEdge =
+            link.circularPathData.rightFullExtent + hw + gap;
+        });
+      });
     });
   })();
 

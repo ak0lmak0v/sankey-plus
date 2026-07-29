@@ -518,12 +518,60 @@ test("cjm-v0: cross-band right legs in one source column stay separated", () => 
   assert.equal(inner.circularLinkType, "bottom");
 
   const gap = chart.config.links.circularGap || 0;
+  const outerAfterInner =
+    outer.circularPathData.rightFullExtent -
+    outer.width / 2 -
+    (inner.circularPathData.rightFullExtent + inner.width / 2);
+  const innerAfterOuter =
+    inner.circularPathData.rightFullExtent -
+    inner.width / 2 -
+    (outer.circularPathData.rightFullExtent + outer.width / 2);
+  const visibleGap = Math.max(outerAfterInner, innerAfterOuter);
+  assert.ok(
+    visibleGap >= gap - 1e-6,
+    `Expected ${gap}px between right legs, got ${visibleGap.toFixed(3)}px`
+  );
+});
+
+test("cjm-v0: same-source TOP right legs stay nested near the node", () => {
+  const chart = makeChart();
+  const findLink = (source, target) =>
+    chart.graph.links.find(
+      (link) =>
+        link.source?.name === source &&
+        link.target?.name === target
+    );
+  const inner = findLink(
+    "search-rt-same",
+    "calendar_open-search_rt"
+  );
+  const outer = findLink(
+    "search-rt-same",
+    "date_click-depart-repeated"
+  );
+  const nearby = findLink(
+    "search-ow-same",
+    "date_click-depart-repeated"
+  );
+
+  assert.ok(inner?.circularPathData, "Missing local RT TOP backlink");
+  assert.ok(outer?.circularPathData, "Missing long RT TOP backlink");
+  assert.ok(nearby?.circularPathData, "Missing comparable OW TOP backlink");
+
+  const gap = chart.config.links.circularGap || 0;
   const visibleGap =
     outer.circularPathData.rightFullExtent -
     outer.width / 2 -
     (inner.circularPathData.rightFullExtent + inner.width / 2);
   assert.ok(
     visibleGap >= gap - 1e-6,
-    `Expected ${gap}px between right legs, got ${visibleGap.toFixed(3)}px`
+    `Expected nested RT legs to clear by ${gap}px, got ${visibleGap.toFixed(3)}px`
+  );
+  assert.ok(
+    Math.abs(inner.circularPathData.rightFullExtent -
+      nearby.circularPathData.rightFullExtent) < 10 &&
+      Math.abs(outer.circularPathData.rightFullExtent -
+        nearby.circularPathData.rightFullExtent) < 10,
+    "Expected both RT TOP legs to stay near the comparable OW TOP lane"
   );
 });
