@@ -1042,6 +1042,29 @@ function createVirtualNodes(inputGraph, useVirtualRoutes, id) {
   return graph;
 }
 
+function nodeHeightWithCircularPortGaps(node, graph) {
+  var baseHeight = node.value * graph.ky;
+  var gap = Math.max(0, Number(graph.circularPortGapPx) || 0);
+
+  function requiredPortHeight(links) {
+    var totalWidth = 0;
+    var bottomCircularCount = 0;
+    links.forEach(function(link) {
+      totalWidth += link.width || 0;
+      if (link.circular && link.circularLinkType === "bottom") {
+        bottomCircularCount++;
+      }
+    });
+    return totalWidth + Math.max(0, bottomCircularCount - 1) * gap;
+  }
+
+  return Math.max(
+    baseHeight,
+    requiredPortHeight(node.sourceLinks),
+    requiredPortHeight(node.targetLinks)
+  );
+}
+
 // Assign nodes' breadths, and then shift nodes that overlap (resolveCollisions)
 function computeNodeBreadths() {
 
@@ -1050,7 +1073,7 @@ function computeNodeBreadths() {
   const id = this.config.id;
 
   function nodeHeightPx(node) {
-    return node.value * graph.ky;
+    return nodeHeightWithCircularPortGaps(node, graph);
   }
 
   let columns = groups(graph.nodes, (d) => d.column)
@@ -1384,7 +1407,7 @@ function resolveCollisionsAndRelax() {
     const baseRadius = this.config.links.circularRadius || 10;
     const graph = this.graph;
     function nodeHeightPx(node) {
-      return node.value * graph.ky;
+      return nodeHeightWithCircularPortGaps(node, graph);
     }
     
     columns.forEach((nodes) => {
@@ -2068,6 +2091,8 @@ class SankeyChart {
         this.graph = graph;
       }
     }
+
+    this.graph.circularPortGapPx = circularPortGapPx;
 
     
     this.graph = computeNodeBreadths.call(this);
