@@ -27,6 +27,16 @@ import { adjustGraphExtents } from "./adjustGraphExtents.js";
 
 //internal functions
 
+export function _nodeLabelLines(value) {
+  const label = value == null ? "" : String(value);
+  const breakIndex = label.indexOf("--");
+  if (breakIndex === -1) return [label];
+  return [
+    label.slice(0, breakIndex),
+    label.slice(breakIndex + 2),
+  ];
+}
+
 // Link label helpers (pure; used for hover-mode label text decisions)
 function _sameNodeForLabels(a, b) {
   if (!a || !b) return false;
@@ -2606,13 +2616,34 @@ class SankeyChart {
       .style("cursor", "pointer")
       .style("pointer-events", "visible");
 
-    node
+    const nodeLabels = node
       .append("text")
       .attr("x", (d) => (d.x0 + d.x1) / 2)
       .attr("y", (d) => d.y0 - 8)
-      .attr("dy", "0.35em")
-      .attr("text-anchor", "middle")
-      .text(this.config.id);
+      .attr("text-anchor", "middle");
+
+    const nodeId = this.config.id;
+    nodeLabels.each(function(d) {
+      const text = select(this);
+      const x = (d.x0 + d.x1) / 2;
+      const lines = _nodeLabelLines(nodeId(d));
+      if (lines.length === 1) {
+        text.attr("dy", "0.35em").text(lines[0]);
+        return;
+      }
+
+      text.attr("y", d.y0 - 10).attr("dy", null);
+      text
+        .append("tspan")
+        .attr("x", x)
+        .attr("dy", "-0.55em")
+        .text(lines[0]);
+      text
+        .append("tspan")
+        .attr("x", x)
+        .attr("dy", "1.1em")
+        .text(lines[1]);
+    });
 
     const sankeyGraph = this.graph;
     node.append("title").text(function (d) {

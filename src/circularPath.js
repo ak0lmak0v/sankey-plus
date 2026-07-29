@@ -756,6 +756,26 @@ export function addCircularPathData(
         
         if (gap < required) {
           var delta = required - gap + 1e-6;
+          if (selfLinking(curr, id) && !selfLinking(prev, id)) {
+            var desiredPrevRfe =
+              curr.circularPathData.rightFullExtent + (prevW + currW) / 2 + required + 1e-6;
+            var prevDelta = desiredPrevRfe - prev.circularPathData.rightFullExtent;
+            if (prevDelta > 1e-6) {
+              prev.circularPathData.rightLargeArcRadius += prevDelta;
+              if (typeof prev.circularPathData.rightSmallArcRadius === "number") {
+                prev.circularPathData.rightSmallArcRadius += prevDelta;
+                if (prev.circularPathData.rightSmallArcRadius > prev.circularPathData.rightLargeArcRadius) {
+                  prev.circularPathData.rightSmallArcRadius = prev.circularPathData.rightLargeArcRadius;
+                }
+              }
+              prev.circularPathData.rightFullExtent =
+                prev.circularPathData.sourceX +
+                prev.circularPathData.rightLargeArcRadius +
+                (prev.circularPathData.rightNodeBuffer || 0);
+              rightChanged = true;
+            }
+            continue;
+          }
           // Push curr outward (increase rfe)
           curr.circularPathData.rightLargeArcRadius += delta;
           if (typeof curr.circularPathData.rightSmallArcRadius === "number") {
@@ -1004,6 +1024,9 @@ export function addCircularPathData(
         var anyChange = false;
 
         group.sort(function(a, b) {
+          var aSelf = selfLinking(a, id);
+          var bSelf = selfLinking(b, id);
+          if (aSelf !== bSelf) return aSelf ? -1 : 1;
           var ar = a.circularPathData.rightFullExtent;
           var br = b.circularPathData.rightFullExtent;
           if (ar !== br) return ar - br;
@@ -1141,6 +1164,16 @@ export function addCircularPathData(
       wbGroups[key].push(l);
     });
 
+    function rightLegOverlapAmount(a, b) {
+      var ac = a.circularPathData;
+      var bc = b.circularPathData;
+      var aMin = Math.min(ac.sourceY, ac.verticalRightInnerExtent);
+      var aMax = Math.max(ac.sourceY, ac.verticalRightInnerExtent);
+      var bMin = Math.min(bc.sourceY, bc.verticalRightInnerExtent);
+      var bMax = Math.max(bc.sourceY, bc.verticalRightInnerExtent);
+      return Math.max(0, Math.min(aMax, bMax) - Math.max(aMin, bMin));
+    }
+
     Object.keys(wbGroups).forEach(function(k) {
       var group = wbGroups[k];
       if (group.length < 2) return;
@@ -1166,26 +1199,34 @@ export function addCircularPathData(
           var pC = prev.circularPathData;
           var cC = curr.circularPathData;
 
-          var pSrcY = pC.sourceY;
-          var pVri = pC.verticalRightInnerExtent;
-          var cSrcY = cC.sourceY;
-          var cVri = cC.verticalRightInnerExtent;
-          var pMin = Math.min(pSrcY, pVri);
-          var pMax = Math.max(pSrcY, pVri);
-          var cMin = Math.min(cSrcY, cVri);
-          var cMax = Math.max(cSrcY, cVri);
-          var vOverlap = Math.max(0, Math.min(pMax, cMax) - Math.max(pMin, cMin));
-          if (vOverlap <= 1e-6) continue;
-
           var prevW = prev.width || 0;
           var currW = curr.width || 0;
           var prevRight = pC.rightFullExtent + prevW / 2;
           var currLeft = cC.rightFullExtent - currW / 2;
           var gap = currLeft - prevRight;
           var required = circularLinkGap || 0;
+          var vOverlap = rightLegOverlapAmount(prev, curr);
 
-          if (gap < required) {
+          if (vOverlap > 1e-6 && gap < required) {
             var delta = required - gap + 1e-6;
+            if (selfLinking(curr, id) && !selfLinking(prev, id)) {
+              var desiredPrevRfe =
+                cC.rightFullExtent + (prevW + currW) / 2 + required + 1e-6;
+              var prevDelta = desiredPrevRfe - pC.rightFullExtent;
+              if (prevDelta > 1e-6) {
+                pC.rightLargeArcRadius += prevDelta;
+                if (typeof pC.rightSmallArcRadius === "number") {
+                  pC.rightSmallArcRadius += prevDelta;
+                  if (pC.rightSmallArcRadius > pC.rightLargeArcRadius) {
+                    pC.rightSmallArcRadius = pC.rightLargeArcRadius;
+                  }
+                }
+                pC.rightFullExtent =
+                  pC.sourceX + pC.rightLargeArcRadius + (pC.rightNodeBuffer || 0);
+                changed = true;
+              }
+              continue;
+            }
             cC.rightLargeArcRadius += delta;
             if (typeof cC.rightSmallArcRadius === "number") {
               cC.rightSmallArcRadius += delta;
@@ -1196,6 +1237,37 @@ export function addCircularPathData(
             cC.rightFullExtent =
               cC.sourceX + cC.rightLargeArcRadius + (cC.rightNodeBuffer || 0);
             changed = true;
+          }
+
+          if (!selfLinking(curr, id)) {
+            var minRadius = baseRadius + currW / 2;
+            var minRfe = cC.sourceX + (cC.rightNodeBuffer || 0) + minRadius;
+            for (var bi = 0; bi < i; bi++) {
+              var blocker = group[bi];
+              if (blocker.circularPathData.rightFullExtent >= cC.rightFullExtent - 1e-6) continue;
+              if (rightLegOverlapAmount(blocker, curr) <= 1e-6) continue;
+              var blockerBound = blocker.circularPathData.rightFullExtent +
+                ((blocker.width || 0) + currW) / 2 + required;
+              if (blockerBound > minRfe) minRfe = blockerBound;
+            }
+            if (minRfe < cC.rightFullExtent - 1e-6) {
+              var nextRadius = minRfe - cC.sourceX - (cC.rightNodeBuffer || 0);
+              if (nextRadius < minRadius) nextRadius = minRadius;
+              if (nextRadius < cC.rightLargeArcRadius - 1e-6) {
+                cC.rightLargeArcRadius = nextRadius;
+                if (typeof cC.rightSmallArcRadius === "number" &&
+                    cC.rightSmallArcRadius > cC.rightLargeArcRadius) {
+                  cC.rightSmallArcRadius = cC.rightLargeArcRadius;
+                }
+                cC.rightFullExtent = cC.sourceX + cC.rightLargeArcRadius + (cC.rightNodeBuffer || 0);
+                if (curr.circularLinkType === "bottom") {
+                  cC.verticalRightInnerExtent = cC.verticalFullExtent - cC.rightLargeArcRadius;
+                } else {
+                  cC.verticalRightInnerExtent = cC.verticalFullExtent + cC.rightLargeArcRadius;
+                }
+                changed = true;
+              }
+            }
           }
         }
 
@@ -1395,12 +1467,12 @@ export function addCircularPathData(
     if (!l.circularPathData) return;
     if (selfLinking(l, id)) return;
     if (typeof l.circularPathData.leftLargeArcRadius !== "number") return;
-    // Group by target column ONLY (not by circularLinkType). This ensures
-    // TOP and BOTTOM links in the same column see each other as obstacles,
-    // preventing cross-band overlaps that would otherwise need a separate pass.
+    // Group by target node. Cross-target interactions are handled by the narrower
+    // self-loop/cross-band clearance passes; grouping the whole column here makes
+    // non-overlapping target bundles reserve space for each other.
     var targetKey =
-      l.target && typeof l.target.column === "number"
-        ? String(l.target.column)
+      l.target
+        ? String(id(l.target))
         : String(Math.round((l.circularPathData.targetX || 0) * 10) / 10);
     if (!leftGroups[targetKey]) leftGroups[targetKey] = [];
     leftGroups[targetKey].push(l);
@@ -1435,15 +1507,15 @@ export function addCircularPathData(
       return b.circularPathData.leftFullExtent - a.circularPathData.leftFullExtent;
     });
 
-    // Pre-populate placed list with self-loops in this target column
+    // Pre-populate placed list with self-loops on this target node
     // (immovable obstacles from the self-loop clearance pass).
     var placed = [];
     var firstTarget = group[0] && group[0].target;
-    if (selfLoopsByTargetCol && firstTarget && typeof firstTarget.column === "number") {
-      var colLoops = selfLoopsByTargetCol[String(firstTarget.column)];
-      if (colLoops) {
-        for (var sl = 0; sl < colLoops.length; sl++) {
-          var loop = colLoops[sl];
+    if (leftSelfLoopByTarget && firstTarget) {
+      var targetLoops = leftSelfLoopByTarget[String(id(firstTarget))];
+      if (targetLoops) {
+        for (var sl = 0; sl < targetLoops.length; sl++) {
+          var loop = targetLoops[sl];
           if (!loop || !loop.circularPathData) continue;
           var lc = loop.circularPathData;
           placed.push({
@@ -1461,11 +1533,16 @@ export function addCircularPathData(
       var c = link.circularPathData;
       var hw = (link.width || 0) / 2;
 
-      // Broad Y range for overlap checking (port to VFE).
-      var tY = typeof link.y1 === "number" ? link.y1
-        : (link.target && typeof link.target.y1 === "number" ? link.target.y1 : 0);
-      var yMin = Math.min(tY, c.verticalFullExtent);
-      var yMax = Math.max(tY, c.verticalFullExtent);
+      // Only the actual LEFT vertical leg should reserve horizontal space.
+      // Using targetY -> verticalFullExtent makes non-overlapping shelves look like obstacles.
+      var tY = typeof c.targetY === "number"
+        ? c.targetY
+        : (typeof link.y1 === "number"
+          ? link.y1
+          : (link.target && typeof link.target.y1 === "number" ? link.target.y1 : 0));
+      var vLeft = typeof c.verticalLeftInnerExtent === "number" ? c.verticalLeftInnerExtent : c.verticalFullExtent;
+      var yMin = Math.min(tY, vLeft);
+      var yMax = Math.max(tY, vLeft);
 
       // Maximum lfe = minimum radius, closest to node.
       var maxLfe = c.targetX - (c.leftNodeBuffer || 0) - baseRadius - hw;
@@ -1613,17 +1690,21 @@ export function addCircularPathData(
 
         // Check vertical overlap on the left leg using target port and verticalLeftInnerExtent.
         var oTargetY =
-          typeof outer.y1 === "number"
-            ? outer.y1
-            : (outer.target && typeof outer.target.y1 === "number" ? outer.target.y1 : 0);
+          typeof outer.circularPathData.targetY === "number"
+            ? outer.circularPathData.targetY
+            : (typeof outer.y1 === "number"
+              ? outer.y1
+              : (outer.target && typeof outer.target.y1 === "number" ? outer.target.y1 : 0));
         var oV = outer.circularPathData.verticalLeftInnerExtent;
         var oMin = Math.min(oTargetY, oV);
         var oMax = Math.max(oTargetY, oV);
 
         var iTargetY =
-          typeof inner.y1 === "number"
-            ? inner.y1
-            : (inner.target && typeof inner.target.y1 === "number" ? inner.target.y1 : 0);
+          typeof inner.circularPathData.targetY === "number"
+            ? inner.circularPathData.targetY
+            : (typeof inner.y1 === "number"
+              ? inner.y1
+              : (inner.target && typeof inner.target.y1 === "number" ? inner.target.y1 : 0));
         var iV = inner.circularPathData.verticalLeftInnerExtent;
         var iMin = Math.min(iTargetY, iV);
         var iMax = Math.max(iTargetY, iV);
@@ -1695,11 +1776,15 @@ export function addCircularPathData(
         var c = link.circularPathData;
         var hw = (link.width || 0) / 2;
 
-        var tY = typeof link.y1 === "number" ? link.y1
-          : (link.target && typeof link.target.y1 === "number" ? link.target.y1 : 0);
+        var tY = typeof c.targetY === "number"
+          ? c.targetY
+          : (typeof link.y1 === "number"
+            ? link.y1
+            : (link.target && typeof link.target.y1 === "number" ? link.target.y1 : 0));
+        var vLeft = typeof c.verticalLeftInnerExtent === "number" ? c.verticalLeftInnerExtent : c.verticalFullExtent;
         var vfe = c.verticalFullExtent;
-        var yMin = Math.min(tY, vfe);
-        var yMax = Math.max(tY, vfe);
+        var yMin = Math.min(tY, vLeft);
+        var yMax = Math.max(tY, vLeft);
 
         var maxLfe = c.targetX - (c.leftNodeBuffer || 0) - baseRadius - hw;
 
@@ -1712,11 +1797,15 @@ export function addCircularPathData(
           var oc = other.circularPathData;
           var oHW = (other.width || 0) / 2;
 
-          var oTY = typeof other.y1 === "number" ? other.y1
-            : (other.target && typeof other.target.y1 === "number" ? other.target.y1 : 0);
+          var oTY = typeof oc.targetY === "number"
+            ? oc.targetY
+            : (typeof other.y1 === "number"
+              ? other.y1
+              : (other.target && typeof other.target.y1 === "number" ? other.target.y1 : 0));
+          var oVLeft = typeof oc.verticalLeftInnerExtent === "number" ? oc.verticalLeftInnerExtent : oc.verticalFullExtent;
           var oVfe = oc.verticalFullExtent;
-          var oYMin = Math.min(oTY, oVfe);
-          var oYMax = Math.max(oTY, oVfe);
+          var oYMin = Math.min(oTY, oVLeft);
+          var oYMax = Math.max(oTY, oVLeft);
           var yOvLen = Math.min(yMax, oYMax) - Math.max(yMin, oYMin);
           if (yOvLen < minYOv) continue;
 
@@ -2413,6 +2502,7 @@ export function addCircularPathData(
           }
         }
       });
+
     }
 
     // ===================== TOP =====================
@@ -2580,8 +2670,8 @@ export function addCircularPathData(
       }
     }
 
-    // Phase 3C: Tighten local (span<=1) TOP links towards their nearest neighbor
-    // in the same target-node bundle. Runs after compaction for final word.
+    // Phase 3C: Tighten TOP links towards their nearest neighbor in the same
+    // target-node bundle. Runs after compaction for final word.
     if (gap > 0) {
       var topAllNonSelf = topLinks.filter(function(l) {
         return !selfLinking(l, id) &&
@@ -2597,6 +2687,79 @@ export function addCircularPathData(
         arr.push(l);
       });
 
+      function syncTopVerticalForTightening(link) {
+        var c = link.circularPathData;
+        if (!c) return;
+        if (typeof c.rightLargeArcRadius === "number") {
+          c.verticalRightInnerExtent = c.verticalFullExtent + c.rightLargeArcRadius;
+        }
+        if (typeof c.leftLargeArcRadius === "number") {
+          c.verticalLeftInnerExtent = c.verticalFullExtent + c.leftLargeArcRadius;
+        }
+      }
+
+      function topCeilingForTightening(link) {
+        var c = link.circularPathData;
+        var halfW = (link.width || 0) / 2;
+        var ceiling = Infinity;
+        if (typeof c.sourceY === "number" &&
+            typeof c.rightSmallArcRadius === "number" &&
+            typeof c.rightLargeArcRadius === "number") {
+          var minRightSmall = Math.min(c.rightSmallArcRadius, baseRadius + halfW);
+          ceiling = Math.min(ceiling, c.sourceY - minRightSmall - c.rightLargeArcRadius - 1e-6);
+        }
+        if (typeof c.targetY === "number" &&
+            typeof c.leftSmallArcRadius === "number" &&
+            typeof c.leftLargeArcRadius === "number") {
+          var minLeftSmall = Math.min(c.leftSmallArcRadius, baseRadius + halfW);
+          ceiling = Math.min(ceiling, c.targetY - minLeftSmall - c.leftLargeArcRadius - 1e-6);
+        }
+
+        var xr = _shelfX(link);
+        if (xr) {
+          var srcId = link.source ? id(link.source) : null;
+          var tgtId = link.target ? id(link.target) : null;
+          for (var ni = 0; ni < graph.nodes.length; ni++) {
+            var nd = graph.nodes[ni];
+            if (!nd || nd.virtual) continue;
+            if (id(nd) === srcId || id(nd) === tgtId) continue;
+            if (typeof nd.x0 !== "number" || typeof nd.x1 !== "number") continue;
+            if (typeof nd.y0 !== "number") continue;
+            if (nd.x1 <= xr.x0 || nd.x0 >= xr.x1) continue;
+            ceiling = Math.min(ceiling, nd.y0 - gap - halfW);
+          }
+        }
+        return ceiling;
+      }
+
+      function shrinkTopRightSmallToVfe(link) {
+        var c = link.circularPathData;
+        if (!c) return;
+        if (typeof c.sourceY !== "number" ||
+            typeof c.rightSmallArcRadius !== "number" ||
+            typeof c.rightLargeArcRadius !== "number") return;
+        var minRightSmall = baseRadius + (link.width || 0) / 2;
+        var nextSmall = c.sourceY - c.verticalFullExtent - c.rightLargeArcRadius;
+        if (nextSmall < minRightSmall) nextSmall = minRightSmall;
+        if (nextSmall < c.rightSmallArcRadius - 1e-6) {
+          c.rightSmallArcRadius = nextSmall;
+        }
+      }
+
+      function shrinkTopLeftSmallToVfe(link) {
+        var c = link.circularPathData;
+        if (!c) return;
+        if (typeof c.targetY !== "number" ||
+            typeof c.leftSmallArcRadius !== "number" ||
+            typeof c.leftLargeArcRadius !== "number") return;
+        var minLeftSmall = baseRadius + (link.width || 0) / 2;
+        var nextSmall = c.targetY - c.verticalFullExtent - c.leftLargeArcRadius;
+        if (nextSmall < minLeftSmall) nextSmall = minLeftSmall;
+        if (nextSmall < c.leftSmallArcRadius - 1e-6) {
+          c.leftSmallArcRadius = nextSmall;
+        }
+      }
+
       var maxTightenIters = 5;
       topByTarget.forEach(function(grp) {
         if (!grp || grp.length < 2) return;
@@ -2607,7 +2770,6 @@ export function addCircularPathData(
           });
           for (var giT = 1; giT < grp.length; giT++) {
             var inner = grp[giT];
-            if (linkSpan(inner) > 1) continue;
             var outer = null;
             for (var kk = giT - 1; kk >= 0; kk--) {
               if (shelvesOverlapX(grp[kk], inner)) { outer = grp[kk]; break; }
@@ -2632,15 +2794,6 @@ export function addCircularPathData(
             var tightenTarget = outer.circularPathData.verticalFullExtent + (outerW + innerW) / 2 + gap;
             if (tightenTarget < minAllowed) tightenTarget = minAllowed;
 
-            for (var pp2 = 0; pp2 < topAllNonSelf.length; pp2++) {
-              var pAbove = topAllNonSelf[pp2];
-              if (pAbove === inner) continue;
-              if (pAbove.circularPathData.verticalFullExtent <= inner.circularPathData.verticalFullExtent) continue;
-              if (!shelvesOverlapX(pAbove, inner)) continue;
-              var floorFromAbove = pAbove.circularPathData.verticalFullExtent - ((pAbove.width || 0) + innerW) / 2 - gap;
-              if (floorFromAbove > tightenTarget) tightenTarget = floorFromAbove;
-            }
-
             if (tightenTarget < inner.circularPathData.verticalFullExtent - 1e-6) {
               var pullUp = inner.circularPathData.verticalFullExtent - tightenTarget;
               inner.circularPathData.verticalFullExtent = tightenTarget;
@@ -2653,6 +2806,44 @@ export function addCircularPathData(
           if (!changedT) break;
         }
       });
+
+      // Cross-target tightening: after each target-node bundle has been made
+      // internally compact, pull the innermost valid shelves down to their
+      // ceilings, then pack overlapping outer shelves directly above them.
+      for (var itTG = 0; itTG < maxTightenIters; itTG++) {
+        var changedTG = false;
+        topAllNonSelf.sort(function(a, b) {
+          return b.circularPathData.verticalFullExtent - a.circularPathData.verticalFullExtent;
+        });
+        for (var giTG = 0; giTG < topAllNonSelf.length; giTG++) {
+          var link = topAllNonSelf[giTG];
+          var linkC = link.circularPathData;
+          var linkW = link.width || 0;
+          var maxAllowed = topCeilingForTightening(link);
+
+          for (var prevI = 0; prevI < giTG; prevI++) {
+            var prevLink = topAllNonSelf[prevI];
+            if (!shelvesOverlapX(prevLink, link)) continue;
+            var bound = prevLink.circularPathData.verticalFullExtent -
+              ((prevLink.width || 0) + linkW) / 2 - gap;
+            if (bound < maxAllowed) maxAllowed = bound;
+          }
+
+          if (maxAllowed === Infinity) continue;
+          if (maxAllowed > linkC.verticalFullExtent + 1e-6) {
+            var pullDown = maxAllowed - linkC.verticalFullExtent;
+            linkC.verticalFullExtent = maxAllowed;
+            shrinkTopRightSmallToVfe(link);
+            shrinkTopLeftSmallToVfe(link);
+            if (typeof linkC.verticalBuffer === "number") {
+              linkC.verticalBuffer -= pullDown;
+            }
+            syncTopVerticalForTightening(link);
+            changedTG = true;
+          }
+        }
+        if (!changedTG) break;
+      }
     }
     {
     }
@@ -3422,90 +3613,6 @@ export function addCircularPathData(
     }
   });
 
-  // Final pass: enforce visual gap for left vertical legs of sub-pixel circular links.
-  // Same anti-aliasing compensation as the VFE pass above, but for leftFullExtent (X axis).
-  // Only push legs apart if they overlap in Y range (otherwise they don't visually conflict).
-  (function enforceLeftLegVisualGap() {
-    var gap = circularLinkGap || 0;
-    if (gap <= 0) return;
-    var circLinks = graph.links.filter(function(l) {
-      return l && l.circular && !l.isVirtual && l.circularPathData &&
-             typeof l.circularPathData.leftFullExtent === "number";
-    });
-    if (circLinks.length < 2) return;
-
-    // Group by target column (left legs connect at the target)
-    var byCol = {};
-    circLinks.forEach(function(l) {
-      var col = l.target && typeof l.target.column === "number" ? l.target.column : -1;
-      if (!byCol[col]) byCol[col] = [];
-      byCol[col].push(l);
-    });
-
-    Object.keys(byCol).forEach(function(col) {
-      var group = byCol[col];
-      if (group.length < 2) return;
-
-      var maxIter = 20;
-      for (var iter = 0; iter < maxIter; iter++) {
-        // Sort by LFE ascending (further from node = more negative first)
-        group.sort(function(a, b) {
-          return a.circularPathData.leftFullExtent - b.circularPathData.leftFullExtent;
-        });
-
-        var changed = false;
-        for (var i = 1; i < group.length; i++) {
-          var outer = group[i - 1]; // further from node (smaller LFE)
-          var inner = group[i];     // closer to node (larger LFE)
-          var oc = outer.circularPathData;
-          var ic = inner.circularPathData;
-
-          // Check vertical overlap of left legs
-          var oTargetY = typeof outer.y1 === "number" ? outer.y1 : (outer.target && typeof outer.target.y0 === "number" ? outer.target.y0 : 0);
-          var oVLI = typeof oc.verticalLeftInnerExtent === "number" ? oc.verticalLeftInnerExtent : oc.verticalFullExtent;
-          var oYMin = Math.min(oTargetY, oVLI);
-          var oYMax = Math.max(oTargetY, oVLI);
-
-          var iTargetY = typeof inner.y1 === "number" ? inner.y1 : (inner.target && typeof inner.target.y0 === "number" ? inner.target.y0 : 0);
-          var iVLI = typeof ic.verticalLeftInnerExtent === "number" ? ic.verticalLeftInnerExtent : ic.verticalFullExtent;
-          var iYMin = Math.min(iTargetY, iVLI);
-          var iYMax = Math.max(iTargetY, iVLI);
-
-          var yOverlap = Math.max(0, Math.min(oYMax, iYMax) - Math.max(oYMin, iYMin));
-          if (yOverlap <= 1e-6) continue;
-
-          var outerVisHW = Math.max(outer.width || 0, 1) / 2;
-          var innerVisHW = Math.max(inner.width || 0, 1) / 2;
-          var outerRightVisEdge = oc.leftFullExtent + outerVisHW;
-          var innerLeftVisEdge = ic.leftFullExtent - innerVisHW;
-          var visualGap = innerLeftVisEdge - outerRightVisEdge;
-
-          if (visualGap < gap - 1e-6) {
-            var deficit = gap - visualGap;
-            // Push outer further left
-            oc.leftLargeArcRadius += deficit;
-            if (typeof oc.leftSmallArcRadius === "number") {
-              oc.leftSmallArcRadius += deficit;
-              if (oc.leftSmallArcRadius > oc.leftLargeArcRadius) {
-                oc.leftSmallArcRadius = oc.leftLargeArcRadius;
-              }
-            }
-            oc.leftFullExtent = oc.targetX - oc.leftLargeArcRadius - (oc.leftNodeBuffer || 0);
-            if (outer.circularLinkType === "bottom") {
-              oc.verticalLeftInnerExtent = oc.verticalFullExtent - oc.leftLargeArcRadius;
-            } else {
-              oc.verticalLeftInnerExtent = oc.verticalFullExtent + oc.leftLargeArcRadius;
-            }
-            changed = true;
-          }
-        }
-        if (!changed) break;
-      }
-    });
-  })();
-  {
-  }
-
   // Final pass: keep target-node bundles contiguous in each circular band.
   // The global gap/visual passes operate pairwise and can place links from a
   // smaller target group between links that share the same target. If there is
@@ -3829,6 +3936,143 @@ export function addCircularPathData(
     enforceSearchTargetAdjacency("bottom");
     enforceSearchTargetAdjacency("top");
   })();
+
+  // Final bottom cross-target tightening. Earlier bottom phases can restore
+  // target-bundle contiguity by pushing links outward; close the remaining
+  // visual gaps between neighboring shelves that really overlap in X.
+  (function tightenBottomAcrossTargets() {
+    var gap = circularLinkGap || 0;
+    if (gap <= 0) return;
+
+    var bottom = graph.links.filter(function(l) {
+      return l && l.circular && l.circularLinkType === "bottom" && !l.isVirtual &&
+             !selfLinking(l, id) && l.circularPathData &&
+             typeof l.circularPathData.verticalFullExtent === "number";
+    });
+    if (bottom.length < 2) return;
+
+    var bottomSelfLoops = graph.links.filter(function(l) {
+      return l && l.circular && l.circularLinkType === "bottom" && !l.isVirtual &&
+             selfLinking(l, id) && l.circularPathData &&
+             typeof l.circularPathData.verticalFullExtent === "number";
+    });
+
+    function syncBottomVertical(link) {
+      var c = link.circularPathData;
+      if (!c) return;
+      if (typeof c.rightLargeArcRadius === "number") {
+        c.verticalRightInnerExtent = c.verticalFullExtent - c.rightLargeArcRadius;
+      }
+      if (typeof c.leftLargeArcRadius === "number") {
+        c.verticalLeftInnerExtent = c.verticalFullExtent - c.leftLargeArcRadius;
+      }
+    }
+
+    function bottomFloor(link) {
+      var c = link.circularPathData;
+      var halfW = (link.width || 0) / 2;
+      var floor = -Infinity;
+      if (typeof c.sourceY === "number" &&
+          typeof c.rightSmallArcRadius === "number" &&
+          typeof c.rightLargeArcRadius === "number") {
+        var minRightSmall = Math.min(c.rightSmallArcRadius, baseRadius + halfW);
+        floor = Math.max(floor, c.sourceY + minRightSmall + c.rightLargeArcRadius + 1e-6);
+      }
+      if (typeof c.targetY === "number" &&
+          typeof c.leftSmallArcRadius === "number" &&
+          typeof c.leftLargeArcRadius === "number") {
+        var minLeftSmall = Math.min(c.leftSmallArcRadius, baseRadius + halfW);
+        floor = Math.max(floor, c.targetY + minLeftSmall + c.leftLargeArcRadius + 1e-6);
+      }
+
+      var xr = _shelfX(link);
+      if (xr) {
+        var srcId = link.source ? id(link.source) : null;
+        var tgtId = link.target ? id(link.target) : null;
+        for (var ni = 0; ni < graph.nodes.length; ni++) {
+          var nd = graph.nodes[ni];
+          if (!nd || nd.virtual) continue;
+          if (id(nd) === srcId || id(nd) === tgtId) continue;
+          if (typeof nd.x0 !== "number" || typeof nd.x1 !== "number") continue;
+          if (typeof nd.y1 !== "number") continue;
+          if (nd.x1 <= xr.x0 || nd.x0 >= xr.x1) continue;
+          floor = Math.max(floor, nd.y1 + gap + halfW);
+        }
+
+        for (var si = 0; si < bottomSelfLoops.length; si++) {
+          var sl = bottomSelfLoops[si];
+          if (!_shelvesOverlapX(sl, link)) continue;
+          floor = Math.max(
+            floor,
+            sl.circularPathData.verticalFullExtent + (sl.width || 0) / 2 + gap + halfW
+          );
+        }
+      }
+      return floor;
+    }
+
+    function shrinkBottomRightSmallToVfe(link) {
+      var c = link.circularPathData;
+      if (!c) return;
+      if (typeof c.sourceY !== "number" ||
+          typeof c.rightSmallArcRadius !== "number" ||
+          typeof c.rightLargeArcRadius !== "number") return;
+      var minRightSmall = baseRadius + (link.width || 0) / 2;
+      var nextSmall = c.verticalFullExtent - c.sourceY - c.rightLargeArcRadius;
+      if (nextSmall < minRightSmall) nextSmall = minRightSmall;
+      if (nextSmall < c.rightSmallArcRadius - 1e-6) {
+        c.rightSmallArcRadius = nextSmall;
+      }
+    }
+
+    function shrinkBottomLeftSmallToVfe(link) {
+      var c = link.circularPathData;
+      if (!c) return;
+      if (typeof c.targetY !== "number" ||
+          typeof c.leftSmallArcRadius !== "number" ||
+          typeof c.leftLargeArcRadius !== "number") return;
+      var minLeftSmall = baseRadius + (link.width || 0) / 2;
+      var nextSmall = c.verticalFullExtent - c.targetY - c.leftLargeArcRadius;
+      if (nextSmall < minLeftSmall) nextSmall = minLeftSmall;
+      if (nextSmall < c.leftSmallArcRadius - 1e-6) {
+        c.leftSmallArcRadius = nextSmall;
+      }
+    }
+
+    for (var iter = 0; iter < 10; iter++) {
+      var changed = false;
+      bottom.sort(function(a, b) {
+        return a.circularPathData.verticalFullExtent - b.circularPathData.verticalFullExtent;
+      });
+
+      for (var i = 0; i < bottom.length; i++) {
+        var link = bottom[i];
+        var c = link.circularPathData;
+        var linkW = link.width || 0;
+        var minAllowed = bottomFloor(link);
+
+        for (var j = 0; j < i; j++) {
+          var prev = bottom[j];
+          if (!_shelvesOverlapX(prev, link)) continue;
+          var bound = prev.circularPathData.verticalFullExtent +
+            ((prev.width || 0) + linkW) / 2 + gap;
+          if (bound > minAllowed) minAllowed = bound;
+        }
+
+        if (minAllowed !== -Infinity && minAllowed < c.verticalFullExtent - 1e-6) {
+          var delta = c.verticalFullExtent - minAllowed;
+          c.verticalFullExtent = minAllowed;
+          shrinkBottomRightSmallToVfe(link);
+          shrinkBottomLeftSmallToVfe(link);
+          if (typeof c.verticalBuffer === "number") c.verticalBuffer -= delta;
+          syncBottomVertical(link);
+          changed = true;
+        }
+      }
+
+      if (!changed) break;
+    }
+  })();
   {
   }
 
@@ -3953,6 +4197,276 @@ export function addCircularPathData(
 
       setFinalVfe(link, targetVfe);
     });
+  })();
+
+  // Final pass: enforce visual gap for left vertical legs of sub-pixel circular links.
+  // This must run after all VFE adjustments: earlier vertical moves can create new
+  // left-leg overlaps or leave same-target bundles wider than necessary.
+  (function enforceLeftLegVisualGap() {
+    var gap = circularLinkGap || 0;
+    if (gap <= 0) return;
+    var circLinks = graph.links.filter(function(l) {
+      return l && l.circular && !l.isVirtual && l.circularPathData &&
+             typeof l.circularPathData.leftFullExtent === "number";
+    });
+    if (circLinks.length < 2) return;
+
+    var byCol = {};
+    circLinks.forEach(function(l) {
+      var col = l.target && typeof l.target.column === "number" ? l.target.column : -1;
+      if (!byCol[col]) byCol[col] = [];
+      byCol[col].push(l);
+    });
+
+    function syncLeft(link) {
+      var c = link.circularPathData;
+      c.leftFullExtent = c.targetX - c.leftLargeArcRadius - (c.leftNodeBuffer || 0);
+      if (link.circularLinkType === "bottom") {
+        c.verticalLeftInnerExtent = c.verticalFullExtent - c.leftLargeArcRadius;
+      } else {
+        c.verticalLeftInnerExtent = c.verticalFullExtent + c.leftLargeArcRadius;
+      }
+    }
+
+    function setLeftFullExtent(link, nextLfe) {
+      var c = link.circularPathData;
+      var nextRadius = c.targetX - (c.leftNodeBuffer || 0) - nextLfe;
+      var minRadius = baseRadius + (link.width || 0) / 2;
+      if (nextRadius < minRadius) nextRadius = minRadius;
+      var delta = nextRadius - c.leftLargeArcRadius;
+      c.leftLargeArcRadius = nextRadius;
+      if (typeof c.leftSmallArcRadius === "number") {
+        c.leftSmallArcRadius += delta;
+        if (c.leftSmallArcRadius < 0) c.leftSmallArcRadius = 0;
+        if (c.leftSmallArcRadius > c.leftLargeArcRadius) {
+          c.leftSmallArcRadius = c.leftLargeArcRadius;
+        }
+      }
+      syncLeft(link);
+    }
+
+    function roundLeftTurnAroundTargetSelfLoop(link, group) {
+      if (!link || selfLinking(link, id) || !link.target) return;
+      var c = link.circularPathData;
+      if (!c || typeof c.leftSmallArcRadius !== "number" ||
+          typeof c.leftLargeArcRadius !== "number" ||
+          typeof c.targetY !== "number" ||
+          typeof c.verticalLeftInnerExtent !== "number") return;
+
+      var targetLoop = group.find(function(candidate) {
+        return candidate !== link &&
+               selfLinking(candidate, id) &&
+               candidate.target === link.target &&
+               candidate.circularLinkType === link.circularLinkType &&
+               candidate.circularPathData &&
+               candidate.circularPathData.leftFullExtent > c.leftFullExtent;
+      });
+      if (!targetLoop) return;
+
+      var availableLeftTurn =
+        link.circularLinkType === "bottom"
+          ? c.verticalLeftInnerExtent - c.targetY
+          : c.targetY - c.verticalLeftInnerExtent;
+      if (availableLeftTurn >= c.leftLargeArcRadius - 1e-6) {
+        c.leftSmallArcRadius = c.leftLargeArcRadius;
+      }
+    }
+
+    var byBottomColumn = new Map();
+    circLinks.forEach(function(l) {
+      if (l.circularLinkType !== "bottom") return;
+      if (!l.target) return;
+      if (selfLinking(l, id)) return;
+      var col = typeof l.target.column === "number" ? l.target.column : -1;
+      var arr = byBottomColumn.get(col);
+      if (!arr) { arr = []; byBottomColumn.set(col, arr); }
+      arr.push(l);
+    });
+
+    byBottomColumn.forEach(function(group) {
+      if (!group || group.length < 2) return;
+      var slots = group.slice().sort(function(a, b) {
+        return b.circularPathData.leftFullExtent - a.circularPathData.leftFullExtent;
+      }).map(function(link) {
+        var c = link.circularPathData;
+        return {
+          leftLargeArcRadius: c.leftLargeArcRadius,
+          leftSmallArcRadius: c.leftSmallArcRadius
+        };
+      });
+
+      group.sort(function(a, b) {
+        var at = a.target && typeof a.target.y0 === "number" ? a.target.y0 : 0;
+        var bt = b.target && typeof b.target.y0 === "number" ? b.target.y0 : 0;
+        if (Math.abs(at - bt) > 1e-6) return bt - at;
+        var ay = a.circularPathData && typeof a.circularPathData.targetY === "number" ? a.circularPathData.targetY : 0;
+        var by = b.circularPathData && typeof b.circularPathData.targetY === "number" ? b.circularPathData.targetY : 0;
+        if (Math.abs(ay - by) > 1e-6) return by - ay;
+        return b.circularPathData.leftFullExtent - a.circularPathData.leftFullExtent;
+      });
+
+      for (var si = 0; si < group.length; si++) {
+        var slotLink = group[si];
+        var slotC = slotLink.circularPathData;
+        var slot = slots[si];
+        slotC.leftLargeArcRadius = slot.leftLargeArcRadius;
+        slotC.leftSmallArcRadius = slot.leftSmallArcRadius;
+        syncLeft(slotLink);
+      }
+    });
+
+    Object.keys(byCol).forEach(function(col) {
+      var group = byCol[col];
+      if (group.length < 2) return;
+
+      var maxIter = 20;
+      for (var iter = 0; iter < maxIter; iter++) {
+        group.sort(function(a, b) {
+          var ar = a.circularPathData.leftFullExtent + Math.max(a.width || 0, 1) / 2;
+          var br = b.circularPathData.leftFullExtent + Math.max(b.width || 0, 1) / 2;
+          if (Math.abs(ar - br) > 1e-6) return ar - br;
+          return a.circularPathData.leftFullExtent - b.circularPathData.leftFullExtent;
+        });
+
+        var changed = false;
+        for (var i = 1; i < group.length; i++) {
+          var inner = group[i];
+          var ic = inner.circularPathData;
+          var iTargetY = typeof ic.targetY === "number" ? ic.targetY : (typeof inner.y1 === "number" ? inner.y1 : (inner.target && typeof inner.target.y0 === "number" ? inner.target.y0 : 0));
+          var iVLI = typeof ic.verticalLeftInnerExtent === "number" ? ic.verticalLeftInnerExtent : ic.verticalFullExtent;
+          var iYMin = Math.min(iTargetY, iVLI);
+          var iYMax = Math.max(iTargetY, iVLI);
+
+          var outer = null;
+          var oc = null;
+          var handledSelfLoopAnchor = false;
+          for (var oi = i - 1; oi >= 0; oi--) {
+            var candidate = group[oi];
+            var cc = candidate.circularPathData;
+            var cTargetY = typeof cc.targetY === "number" ? cc.targetY : (typeof candidate.y1 === "number" ? candidate.y1 : (candidate.target && typeof candidate.target.y0 === "number" ? candidate.target.y0 : 0));
+            var cVLI = typeof cc.verticalLeftInnerExtent === "number" ? cc.verticalLeftInnerExtent : cc.verticalFullExtent;
+            var cYMin = Math.min(cTargetY, cVLI);
+            var cYMax = Math.max(cTargetY, cVLI);
+            var yOverlap = Math.max(0, Math.min(cYMax, iYMax) - Math.max(cYMin, iYMin));
+            if (yOverlap <= 1e-6) continue;
+            if (selfLinking(candidate, id) && !selfLinking(inner, id)) {
+              var loopVisHW = Math.max(candidate.width || 0, 1) / 2;
+              var innerVisHWForLoop = Math.max(inner.width || 0, 1) / 2;
+              var loopLeftVisEdge = cc.leftFullExtent - loopVisHW;
+              var innerRightVisEdge = ic.leftFullExtent + innerVisHWForLoop;
+              var loopGap = loopLeftVisEdge - innerRightVisEdge;
+              if (loopGap < gap - 1e-6) {
+                setLeftFullExtent(inner, loopLeftVisEdge - gap - innerVisHWForLoop);
+                changed = true;
+                handledSelfLoopAnchor = true;
+              }
+              continue;
+            }
+            outer = candidate;
+            oc = cc;
+            break;
+          }
+          if (handledSelfLoopAnchor) continue;
+          if (!outer) continue;
+
+          var outerVisHW = Math.max(outer.width || 0, 1) / 2;
+          var innerVisHW = Math.max(inner.width || 0, 1) / 2;
+          var outerRightVisEdge = oc.leftFullExtent + outerVisHW;
+          var innerLeftVisEdge = ic.leftFullExtent - innerVisHW;
+          var visualGap = innerLeftVisEdge - outerRightVisEdge;
+
+          if (visualGap < gap - 1e-6) {
+            var deficit = gap - visualGap;
+            oc.leftLargeArcRadius += deficit;
+            if (typeof oc.leftSmallArcRadius === "number") {
+              oc.leftSmallArcRadius += deficit;
+              if (oc.leftSmallArcRadius > oc.leftLargeArcRadius) {
+                oc.leftSmallArcRadius = oc.leftLargeArcRadius;
+              }
+            }
+            syncLeft(outer);
+            changed = true;
+          } else if (
+            visualGap > gap + 1e-6 &&
+            !selfLinking(outer, id) &&
+            outer.circularLinkType === inner.circularLinkType &&
+            outer.target === inner.target
+          ) {
+            var idealOuterLfe = ic.leftFullExtent - innerVisHW - gap - outerVisHW;
+            if (idealOuterLfe > oc.leftFullExtent + 1e-6) {
+              var pull = idealOuterLfe - oc.leftFullExtent;
+              var minRadius = baseRadius + (outer.width || 0) / 2;
+              oc.leftLargeArcRadius -= pull;
+              if (oc.leftLargeArcRadius < minRadius) {
+                oc.leftLargeArcRadius = minRadius;
+              }
+              if (typeof oc.leftSmallArcRadius === "number") {
+                oc.leftSmallArcRadius -= pull;
+                if (oc.leftSmallArcRadius < 0) oc.leftSmallArcRadius = 0;
+                if (oc.leftSmallArcRadius > oc.leftLargeArcRadius) {
+                  oc.leftSmallArcRadius = oc.leftLargeArcRadius;
+                }
+              }
+              syncLeft(outer);
+              changed = true;
+            }
+          }
+        }
+        if (!changed) break;
+      }
+      // Clearance is now final for this target column. If a backlink wraps
+      // around its own target's self-loop, restore the concentric target turn
+      // that earlier radius compaction may have flattened.
+      group.forEach(function(link) {
+        roundLeftTurnAroundTargetSelfLoop(link, group);
+      });
+    });
+
+    var byBottomTarget = new Map();
+    circLinks.forEach(function(l) {
+      if (l.circularLinkType !== "bottom") return;
+      if (!l.target) return;
+      var arr = byBottomTarget.get(l.target);
+      if (!arr) { arr = []; byBottomTarget.set(l.target, arr); }
+      arr.push(l);
+    });
+
+    byBottomTarget.forEach(function(group) {
+      var nonSelf = group.filter(function(l) { return !selfLinking(l, id); });
+      if (nonSelf.length < 2) return;
+
+      var selfLoops = group.filter(function(l) { return selfLinking(l, id); });
+      var innerBoundary = -Infinity;
+      selfLoops.forEach(function(loop) {
+        var c = loop.circularPathData;
+        var leftEdge = c.leftFullExtent - Math.max(loop.width || 0, 1) / 2;
+        if (leftEdge > innerBoundary) innerBoundary = leftEdge;
+      });
+      if (innerBoundary === -Infinity) {
+        nonSelf.forEach(function(link) {
+          var c = link.circularPathData;
+          var rightEdge = c.leftFullExtent + Math.max(link.width || 0, 1) / 2;
+          if (rightEdge > innerBoundary) innerBoundary = rightEdge;
+        });
+      }
+
+      nonSelf.sort(function(a, b) {
+        var ay = a.circularPathData && typeof a.circularPathData.targetY === "number" ? a.circularPathData.targetY : 0;
+        var by = b.circularPathData && typeof b.circularPathData.targetY === "number" ? b.circularPathData.targetY : 0;
+        if (Math.abs(ay - by) > 1e-6) return by - ay;
+        return b.circularPathData.leftFullExtent - a.circularPathData.leftFullExtent;
+      });
+
+      var nextRightEdge = innerBoundary;
+      for (var pi = 0; pi < nonSelf.length; pi++) {
+        var link = nonSelf[pi];
+        var hw = Math.max(link.width || 0, 1) / 2;
+        var nextLfe = nextRightEdge - gap - hw;
+        setLeftFullExtent(link, nextLfe);
+        nextRightEdge = link.circularPathData.leftFullExtent - hw;
+      }
+    });
+
   })();
 
   graph.links.forEach(function(link) {

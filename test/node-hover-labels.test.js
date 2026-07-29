@@ -1,7 +1,21 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { _linkLabelText, _linkLabelAnchorX, _linkLabelAnchorY, _selfLoopLabelAnchorY } from "../src/sankeyPlus.js";
+import {
+  _linkLabelText,
+  _linkLabelAnchorX,
+  _linkLabelAnchorY,
+  _nodeLabelLines,
+  _selfLoopLabelAnchorY,
+} from "../src/sankeyPlus.js";
+
+test("node label: split on the first double hyphen into two lines", () => {
+  assert.deepEqual(
+    _nodeLabelLines("calendar--return_input--clicked"),
+    ["calendar", "return_input--clicked"]
+  );
+  assert.deepEqual(_nodeLabelLines("search-ow"), ["search-ow"]);
+});
 
 test("node-hover: if hovered node is target, show value at source end (neighbor)", () => {
   const pathStart = { name: "path_start", index: 1, column: 0 };

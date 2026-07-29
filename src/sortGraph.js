@@ -498,23 +498,21 @@ export function sortTargetLinks(inputGraph, id, typeOrder, typeAccessor) {
           var w2 = link2.width || 0;
 
           if (link1.circularLinkType === "bottom") {
-            // When leftFullExtent is available (from a prior addCircularPathData pass),
-            // sort by actual x-position of the left vertical segment to avoid crossings
-            // at the target entry point. Bottom-band ports are assigned bottom→top
-            // (first in array → bottommost). The innermost vertical (largest lfe, closest
-            // to node) should get the bottommost port, outermost (smallest lfe) → topmost.
-            // This way each vertical only rises to its own port level and horizontal
-            // entries don't cross other verticals.
-            var lfe1 = link1.circularPathData && link1.circularPathData.leftFullExtent;
-            var lfe2 = link2.circularPathData && link2.circularPathData.leftFullExtent;
-            if (typeof lfe1 === "number" && typeof lfe2 === "number" && Math.abs(lfe1 - lfe2) >= 1e-6) {
-              return lfe2 - lfe1;
-            }
+            // Bottom-band ports are assigned bottom->top (first in array = bottommost).
+            // Keep the semantic nesting order primary: shorter/local links stay lower,
+            // longer backlinks enter above them.  `leftFullExtent` is only a late
+            // tie-breaker; using it first can invert two links to the same target after
+            // left-leg compaction moves one leg closer to the node.
             if (d1 !== d2) return d1 - d2;
             if (s1 !== s2) {
               return s2 - s1;
             }
             if (w1 !== w2) return w1 - w2;
+            var lfe1 = link1.circularPathData && link1.circularPathData.leftFullExtent;
+            var lfe2 = link2.circularPathData && link2.circularPathData.leftFullExtent;
+            if (typeof lfe1 === "number" && typeof lfe2 === "number" && Math.abs(lfe1 - lfe2) >= 1e-6) {
+              return lfe2 - lfe1;
+            }
           } else {
             if (d1 !== d2) return d1 - d2;
             if (s1 !== s2) return s1 - s2;

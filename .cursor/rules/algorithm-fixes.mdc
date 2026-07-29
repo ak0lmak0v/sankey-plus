@@ -1,0 +1,13 @@
+---
+description: Prefer fixing existing algorithm phases before adding layout passes
+alwaysApply: true
+---
+
+# Algorithm Fixes
+
+When debugging layout or algorithmic behavior, first identify which existing phase created or lost the invariant.
+
+- Prefer changing the original algorithm, ordering, ceiling/floor calculation, or compaction rule that caused the bug.
+- Avoid adding another post-pass unless the existing phases cannot express the invariant cleanly.
+- If a new pass seems necessary, explain why integration into an existing phase is not a good fit before implementing it.
+- Verify with runtime values from the affected diagram, not only by visual inspection.
