@@ -45,6 +45,7 @@ function makeChart(chartIndex = 3) {
     links: {
       data: links.map((l) => ({ ...l })),
       circularGap: 0.8,
+      costBasedCircularRouting: false,
       circularLinkPortionTopBottom: 0.01,
       circularLinkPortionLeftRight: 0.2,
       useVirtualRoutes: true,

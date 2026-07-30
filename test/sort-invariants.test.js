@@ -67,6 +67,7 @@ function makeChart() {
     links: {
       data: linksData,
       circularGap: 1,
+      costBasedCircularRouting: false,
       circularLinkPortionTopBottom: 0.4,
       circularLinkPortionLeftRight: 0.1,
       useVirtualRoutes: true,
@@ -267,6 +268,7 @@ test("span=1 search_loop stays aligned with the correct baseline (no drift) (ful
     links: {
       data: fullLinks.map((l) => ({ ...l })),
       circularGap: 1,
+      costBasedCircularRouting: false,
       circularLinkPortionTopBottom: 0.4,
       circularLinkPortionLeftRight: 0.1,
       useVirtualRoutes: true,
@@ -434,6 +436,7 @@ test("top circular links into the same target node maintain minimum gap (saved_f
     links: {
       data: fullLinks.map((l) => ({ ...l })),
       circularGap: 1,
+      costBasedCircularRouting: false,
       circularLinkPortionTopBottom: 0.4,
       circularLinkPortionLeftRight: 0.1,
       useVirtualRoutes: true,
@@ -774,6 +777,7 @@ test("top height ordering: schedule ●→filter should not rise above the saved
     links: {
       data: fullLinks.map((l) => ({ ...l })),
       circularGap: 1,
+      costBasedCircularRouting: false,
       circularLinkPortionTopBottom: 0.4,
       circularLinkPortionLeftRight: 0.1,
       useVirtualRoutes: true,
@@ -856,6 +860,7 @@ test("top min-gap (cross-target): filter→saved_filters_search ● and schedule
     links: {
       data: fullLinks.map((l) => ({ ...l })),
       circularGap: 1,
+      costBasedCircularRouting: false,
       circularLinkPortionTopBottom: 0.4,
       circularLinkPortionLeftRight: 0.1,
       useVirtualRoutes: true,
@@ -947,6 +952,7 @@ test("bottom min-gap (cross-target): schedule ○→search ● and schedule ●�
     links: {
       data: fullLinks.map((l) => ({ ...l })),
       circularGap: 1,
+      costBasedCircularRouting: false,
       circularLinkPortionTopBottom: 0.4,
       circularLinkPortionLeftRight: 0.1,
       useVirtualRoutes: true,

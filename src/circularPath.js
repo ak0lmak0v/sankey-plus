@@ -3195,7 +3195,22 @@ export function addCircularPathData(
       var c = sl.circularPathData;
       var r = typeof c.rightLargeArcRadius === "number"
         ? c.rightLargeArcRadius : (baseRadius + (sl.width || 0) / 2);
-      var compactVfe = node.y1 + Math.max(12, r + 4);
+      var rightSmall = typeof c.rightSmallArcRadius === "number"
+        ? c.rightSmallArcRadius : r;
+      var leftLarge = typeof c.leftLargeArcRadius === "number"
+        ? c.leftLargeArcRadius : r;
+      var leftSmall = typeof c.leftSmallArcRadius === "number"
+        ? c.leftSmallArcRadius : leftLarge;
+      var sourceY = typeof c.sourceY === "number" ? c.sourceY : node.y1;
+      var targetY = typeof c.targetY === "number" ? c.targetY : sourceY;
+      var arcFloor = Math.max(
+        sourceY + rightSmall + r + gap,
+        targetY + leftSmall + leftLarge + gap
+      );
+      var compactVfe = Math.max(
+        node.y1 + Math.max(12, r + 4),
+        arcFloor
+      );
       if (compactVfe >= c.verticalFullExtent - 1e-6) return;
 
       var slHW = (sl.width || 0) / 2;
@@ -3367,13 +3382,13 @@ export function addCircularPathData(
     });
   })();
 
-  // Final pass: reorder TOP links' left-leg positions by target.y0 ASC.
+  // Final pass: reorder TOP links' left-leg positions by target port Y ASC.
   //
   // The greedy placement sorts by target.y0 DESC (correct for BOTTOM, inverted
   // for TOP). After ALL constraint passes are done, we swap LFE slots among
-  // TOP links so that higher targets (smaller y0, shorter legs) are closer to
-  // the node. Because this runs after all gap/crossing enforcement, the swap
-  // is purely cosmetic and doesn't trigger cascading constraint violations.
+  // TOP links so that higher target ports (shorter legs) are closer to the
+  // node. Repack from self-loop anchors because swapping differently-sized
+  // links can otherwise recreate a crossing that an earlier pass removed.
   (function reorderTopLeftLegs() {
     var topByCol = {};
     graph.links.forEach(function(l) {
@@ -3399,10 +3414,16 @@ export function addCircularPathData(
       }
       if (!hasMultipleTargets) return;
 
-      // Desired order: target.y0 ASC (higher target = closer to node), span ASC.
+      // Desired order: target port Y ASC (higher port = closer to node), span ASC.
       var desired = links.slice().sort(function(a, b) {
-        var ay = a.target && typeof a.target.y0 === "number" ? a.target.y0 : 0;
-        var by = b.target && typeof b.target.y0 === "number" ? b.target.y0 : 0;
+        var ac = a.circularPathData;
+        var bc = b.circularPathData;
+        var ay = typeof ac.targetY === "number"
+          ? ac.targetY
+          : (a.target && typeof a.target.y0 === "number" ? a.target.y0 : 0);
+        var by = typeof bc.targetY === "number"
+          ? bc.targetY
+          : (b.target && typeof b.target.y0 === "number" ? b.target.y0 : 0);
         if (Math.abs(ay - by) > 1e-3) return ay - by;
         var sa = Math.abs((a.source.column || 0) - (a.target.column || 0));
         var sb = Math.abs((b.source.column || 0) - (b.target.column || 0));
@@ -3456,18 +3477,53 @@ export function addCircularPathData(
         }
       }
 
-      var sorted = links.slice().sort(function(a, b) {
-        return b.circularPathData.leftFullExtent - a.circularPathData.leftFullExtent;
+      var sorted = desired;
+      var selfLoops = graph.links.filter(function(l) {
+        return l && l.circular && !l.isVirtual &&
+          l.circularLinkType === "top" &&
+          l.circularPathData &&
+          selfLinking(l, id) &&
+          l.target && String(l.target.column) === k;
       });
 
-      for (var si = 1; si < sorted.length; si++) {
-        var inner = sorted[si - 1];
+      function _leftLegsOverlapY(a, b) {
+        var ac = a.circularPathData;
+        var bc = b.circularPathData;
+        var a0 = Math.min(ac.targetY, ac.verticalLeftInnerExtent);
+        var a1 = Math.max(ac.targetY, ac.verticalLeftInnerExtent);
+        var b0 = Math.min(bc.targetY, bc.verticalLeftInnerExtent);
+        var b1 = Math.max(bc.targetY, bc.verticalLeftInnerExtent);
+        return Math.min(a1, b1) > Math.max(a0, b0) + 1e-6;
+      }
+
+      for (var si = 0; si < sorted.length; si++) {
         var outer = sorted[si];
-        var iC = inner.circularPathData;
         var oC = outer.circularPathData;
-        var iHW = (inner.width || 0) / 2;
         var oHW = (outer.width || 0) / 2;
-        var idealLfe = iC.leftFullExtent - iHW - gap - oHW;
+        var idealLfe = oC.leftFullExtent;
+        var constrained = false;
+
+        if (si > 0) {
+          var inner = sorted[si - 1];
+          var iC = inner.circularPathData;
+          var iHW = (inner.width || 0) / 2;
+          idealLfe = iC.leftFullExtent - iHW - gap - oHW;
+          constrained = true;
+        }
+
+        selfLoops.forEach(function(loop) {
+          if (!_leftLegsOverlapY(outer, loop)) return;
+          var loopC = loop.circularPathData;
+          var loopHW = (loop.width || 0) / 2;
+          var outsideLoop =
+            loopC.leftFullExtent - loopHW - gap - oHW;
+          if (!constrained || outsideLoop < idealLfe) {
+            idealLfe = outsideLoop;
+            constrained = true;
+          }
+        });
+
+        if (!constrained) continue;
         if (idealLfe < oC.leftFullExtent) {
           var delta = oC.leftFullExtent - idealLfe;
           oC.leftLargeArcRadius += delta;
@@ -4157,6 +4213,35 @@ export function addCircularPathData(
       }
     }
 
+    function setBottomRightFullExtent(link, nextRfe) {
+      var c = link.circularPathData;
+      var delta = nextRfe - c.rightFullExtent;
+      if (delta <= 1e-6) return false;
+      c.rightLargeArcRadius += delta;
+      if (typeof c.rightSmallArcRadius === "number") {
+        c.rightSmallArcRadius += delta;
+        if (c.rightSmallArcRadius > c.rightLargeArcRadius) {
+          c.rightSmallArcRadius = c.rightLargeArcRadius;
+        }
+      }
+      c.rightFullExtent =
+        c.sourceX + c.rightLargeArcRadius + (c.rightNodeBuffer || 0);
+      var sourceTurnFloor =
+        c.sourceY +
+        c.rightSmallArcRadius +
+        c.rightLargeArcRadius +
+        gap;
+      if (c.verticalFullExtent < sourceTurnFloor - 1e-6) {
+        var floorDelta = sourceTurnFloor - c.verticalFullExtent;
+        c.verticalFullExtent = sourceTurnFloor;
+        if (typeof c.verticalBuffer === "number") {
+          c.verticalBuffer += floorDelta;
+        }
+      }
+      syncBottomVertical(link);
+      return true;
+    }
+
     var bottomBySource = new Map();
     bottom.forEach(function(link) {
       if (!link.source) return;
@@ -4235,6 +4320,69 @@ export function addCircularPathData(
 
       if (!changed) break;
     }
+
+    // Final VFE compaction defines which bottom shelf is outer. Keep the
+    // same-target right-leg nesting in that same order; the earlier right-leg
+    // phase ran before these shelves reached their final vertical positions.
+    var bottomBySourceColumn = {};
+    bottom.forEach(function(link) {
+        var sourceColumn =
+          link.source && typeof link.source.column === "number"
+            ? String(link.source.column)
+            : String(link.circularPathData.sourceX);
+        sourceColumn += "|" + String(link.target ? id(link.target) : "");
+        if (!bottomBySourceColumn[sourceColumn]) {
+          bottomBySourceColumn[sourceColumn] = [];
+        }
+        bottomBySourceColumn[sourceColumn].push(link);
+    });
+    Object.keys(bottomBySourceColumn).forEach(function(sourceColumn) {
+        var sourceColumnLinks = bottomBySourceColumn[sourceColumn];
+        sourceColumnLinks.sort(function(a, b) {
+          return a.circularPathData.verticalFullExtent -
+            b.circularPathData.verticalFullExtent;
+        });
+        for (var outerIndex = 1;
+             outerIndex < sourceColumnLinks.length;
+             outerIndex++) {
+          var outerLink = sourceColumnLinks[outerIndex];
+          var outerC = outerLink.circularPathData;
+          var outerSegMin = Math.min(
+            outerC.sourceY,
+            outerC.verticalRightInnerExtent
+          );
+          var outerSegMax = Math.max(
+            outerC.sourceY,
+            outerC.verticalRightInnerExtent
+          );
+          var requiredOuterRfe = outerC.rightFullExtent;
+          for (var innerIndex = 0;
+               innerIndex < outerIndex;
+               innerIndex++) {
+            var innerLink = sourceColumnLinks[innerIndex];
+            var innerC = innerLink.circularPathData;
+            var innerSegMin = Math.min(
+              innerC.sourceY,
+              innerC.verticalRightInnerExtent
+            );
+            var innerSegMax = Math.max(
+              innerC.sourceY,
+              innerC.verticalRightInnerExtent
+            );
+            if (
+              Math.min(outerSegMax, innerSegMax) <=
+              Math.max(outerSegMin, innerSegMin) + 1e-6
+            ) continue;
+            requiredOuterRfe = Math.max(
+              requiredOuterRfe,
+              innerC.rightFullExtent +
+              ((innerLink.width || 0) + (outerLink.width || 0)) / 2 +
+              gap
+            );
+          }
+          setBottomRightFullExtent(outerLink, requiredOuterRfe);
+        }
+    });
   })();
 
   // Phase 3S (second pass): Re-apply self-loop clearance after the final visual-gap pass.
@@ -4590,6 +4738,285 @@ export function addCircularPathData(
 
       setFinalVfe(link, targetVfe);
     });
+
+    // Self-loop packing runs after the earlier target-bundle compaction and
+    // can split two equal-size TOP bundles. Resolve only those late splits:
+    // the higher target column stays inner and the lower target column moves
+    // outward as one contiguous shelf group.
+    var topByTarget = new Map();
+    graph.links.forEach(function(link) {
+      if (!link || !link.circular || link.isVirtual ||
+          link.circularLinkType !== "top" ||
+          selfLinking(link, id) ||
+          !link.target || !link.circularPathData) return;
+      var targetGroup = topByTarget.get(link.target);
+      if (!targetGroup) {
+        targetGroup = [];
+        topByTarget.set(link.target, targetGroup);
+      }
+      targetGroup.push(link);
+    });
+
+    var orderedTop = [];
+    topByTarget.forEach(function(targetGroup) {
+      orderedTop = orderedTop.concat(targetGroup);
+    });
+    orderedTop.sort(function(a, b) {
+      return b.circularPathData.verticalFullExtent -
+        a.circularPathData.verticalFullExtent;
+    });
+
+    var resolvedPairs = new Set();
+    topByTarget.forEach(function(targetGroup, target) {
+      if (targetGroup.length < 3) return;
+      var positions = [];
+      orderedTop.forEach(function(link, index) {
+        if (link.target === target) positions.push(index);
+      });
+      if (positions.length < 2) return;
+      var minIndex = positions[0];
+      var maxIndex = positions[positions.length - 1];
+      if (maxIndex - minIndex === positions.length - 1) return;
+
+      for (var index = minIndex + 1; index < maxIndex; index++) {
+        var intruder = orderedTop[index];
+        if (intruder.target === target) continue;
+        var competingGroup = topByTarget.get(intruder.target) || [];
+        if (competingGroup.length !== targetGroup.length) continue;
+
+        var targetCol =
+          typeof target.column === "number" ? target.column : -Infinity;
+        var competingCol =
+          intruder.target &&
+          typeof intruder.target.column === "number"
+            ? intruder.target.column
+            : -Infinity;
+        var innerGroup =
+          targetCol >= competingCol ? targetGroup : competingGroup;
+        var outerGroup =
+          targetCol >= competingCol ? competingGroup : targetGroup;
+        var innerTarget =
+          targetCol >= competingCol ? target : intruder.target;
+        var outerTarget =
+          targetCol >= competingCol ? intruder.target : target;
+        var pairKey =
+          String(id(innerTarget)) + "|" + String(id(outerTarget));
+        if (resolvedPairs.has(pairKey)) break;
+        resolvedPairs.add(pairKey);
+
+        var innerOuterEdge = Infinity;
+        innerGroup.forEach(function(link) {
+          var hw = Math.max(link.width || 0, 1) / 2;
+          var outerEdge =
+            link.circularPathData.verticalFullExtent - hw;
+          if (outerEdge < innerOuterEdge) innerOuterEdge = outerEdge;
+        });
+
+        outerGroup.sort(function(a, b) {
+          return b.circularPathData.verticalFullExtent -
+            a.circularPathData.verticalFullExtent;
+        });
+        var nextInnerEdge = innerOuterEdge - gap;
+        outerGroup.forEach(function(link) {
+          var hw = Math.max(link.width || 0, 1) / 2;
+          var nextVfe = nextInnerEdge - hw;
+          setFinalVfe(link, nextVfe);
+          nextInnerEdge = nextVfe - hw - gap;
+        });
+        break;
+      }
+    });
+
+    // Target-bundle moves above happen after the earlier pairwise shelf-gap
+    // pass. Re-apply the gap invariant against every overlapping inner shelf,
+    // preserving the final group order while cascading outer shelves upward.
+    var finalTopShelves = graph.links.filter(function(link) {
+      return link && link.circular && !link.isVirtual &&
+        link.circularLinkType === "top" &&
+        link.circularPathData &&
+        typeof link.circularPathData.verticalFullExtent === "number";
+    }).sort(function(a, b) {
+      return b.circularPathData.verticalFullExtent -
+        a.circularPathData.verticalFullExtent;
+    });
+
+    var targetPositions = new Map();
+    finalTopShelves.forEach(function(link, index) {
+      if (selfLinking(link, id) || !link.target) return;
+      var positions = targetPositions.get(link.target);
+      if (!positions) {
+        positions = [];
+        targetPositions.set(link.target, positions);
+      }
+      positions.push(index);
+    });
+
+    var splitIntervals = [];
+    targetPositions.forEach(function(positions) {
+      if (positions.length < 3) return;
+      var start = positions[0];
+      var end = positions[positions.length - 1];
+      if (end - start === positions.length - 1) return;
+      splitIntervals.push({ start: start, end: end });
+    });
+    splitIntervals.sort(function(a, b) {
+      return a.start - b.start;
+    });
+
+    var mergedIntervals = [];
+    splitIntervals.forEach(function(interval) {
+      var last = mergedIntervals[mergedIntervals.length - 1];
+      if (!last || interval.start > last.end) {
+        mergedIntervals.push({
+          start: interval.start,
+          end: interval.end
+        });
+      } else if (interval.end > last.end) {
+        last.end = interval.end;
+      }
+    });
+
+    var intervalByStart = {};
+    mergedIntervals.forEach(function(interval) {
+      intervalByStart[interval.start] = interval;
+    });
+
+    var orderedSweepShelves = [];
+    var forcedPreviousShelf = new Map();
+    for (var shelfIndex = 0; shelfIndex < finalTopShelves.length;) {
+      var component = intervalByStart[shelfIndex];
+      if (!component) {
+        orderedSweepShelves.push(finalTopShelves[shelfIndex]);
+        shelfIndex++;
+        continue;
+      }
+
+      var units = [];
+      var unitsByTarget = new Map();
+      for (
+        var componentIndex = component.start;
+        componentIndex <= component.end;
+        componentIndex++
+      ) {
+        var componentLink = finalTopShelves[componentIndex];
+        if (selfLinking(componentLink, id) || !componentLink.target) {
+          units.push({
+            links: [componentLink],
+            target: null,
+            firstIndex: componentIndex
+          });
+          continue;
+        }
+        var unit = unitsByTarget.get(componentLink.target);
+        if (!unit) {
+          unit = {
+            links: [],
+            target: componentLink.target,
+            firstIndex: componentIndex
+          };
+          unitsByTarget.set(componentLink.target, unit);
+          units.push(unit);
+        }
+        unit.links.push(componentLink);
+      }
+
+      units.sort(function(a, b) {
+        if (!a.target || !b.target) {
+          return a.firstIndex - b.firstIndex;
+        }
+        var aCol =
+          typeof a.target.column === "number"
+            ? a.target.column
+            : -Infinity;
+        var bCol =
+          typeof b.target.column === "number"
+            ? b.target.column
+            : -Infinity;
+        if (aCol !== bCol) return bCol - aCol;
+        var aY =
+          typeof a.target.y0 === "number" ? a.target.y0 : 0;
+        var bY =
+          typeof b.target.y0 === "number" ? b.target.y0 : 0;
+        if (Math.abs(aY - bY) > 1e-6) return aY - bY;
+        return a.firstIndex - b.firstIndex;
+      });
+
+      var previousComponentLink = null;
+      units.forEach(function(unit) {
+        unit.links.sort(function(a, b) {
+          return b.circularPathData.verticalFullExtent -
+            a.circularPathData.verticalFullExtent;
+        }).forEach(function(link) {
+          if (previousComponentLink) {
+            forcedPreviousShelf.set(link, previousComponentLink);
+          }
+          orderedSweepShelves.push(link);
+          previousComponentLink = link;
+        });
+      });
+      shelfIndex = component.end + 1;
+    }
+    finalTopShelves = orderedSweepShelves;
+
+    var minInnerTopEdgeByColumn = {};
+    for (var topIndex = 0; topIndex < finalTopShelves.length; topIndex++) {
+      var outerShelf = finalTopShelves[topIndex];
+      var outerC = outerShelf.circularPathData;
+      var sourceCol =
+        outerShelf.source &&
+        typeof outerShelf.source.column === "number"
+          ? outerShelf.source.column
+          : 0;
+      var targetCol =
+        outerShelf.target &&
+        typeof outerShelf.target.column === "number"
+          ? outerShelf.target.column
+          : sourceCol;
+      var minCol = Math.min(sourceCol, targetCol);
+      var maxCol = Math.max(sourceCol, targetCol);
+      var outerHW = Math.max(outerShelf.width || 0, 1) / 2;
+      var maxOuterVfe = outerC.verticalFullExtent;
+      var minInnerTopEdge = Infinity;
+      var forcedPrevious = forcedPreviousShelf.get(outerShelf);
+      if (forcedPrevious) {
+        var forcedHW = Math.max(forcedPrevious.width || 0, 1) / 2;
+        var forcedAllowedVfe =
+          forcedPrevious.circularPathData.verticalFullExtent -
+          forcedHW - gap - outerHW;
+        if (forcedAllowedVfe < maxOuterVfe) {
+          maxOuterVfe = forcedAllowedVfe;
+        }
+      }
+
+      for (var col = minCol; col <= maxCol; col++) {
+        var innerTopEdge = minInnerTopEdgeByColumn[col];
+        if (
+          typeof innerTopEdge === "number" &&
+          innerTopEdge < minInnerTopEdge
+        ) {
+          minInnerTopEdge = innerTopEdge;
+        }
+      }
+      if (minInnerTopEdge < Infinity) {
+        var allowedVfe = minInnerTopEdge - gap - outerHW;
+        if (allowedVfe < maxOuterVfe) maxOuterVfe = allowedVfe;
+      }
+
+      if (maxOuterVfe < outerC.verticalFullExtent - 1e-6) {
+        setFinalVfe(outerShelf, maxOuterVfe);
+      }
+
+      var finalTopEdge =
+        outerShelf.circularPathData.verticalFullExtent - outerHW;
+      for (var updateCol = minCol; updateCol <= maxCol; updateCol++) {
+        if (
+          typeof minInnerTopEdgeByColumn[updateCol] !== "number" ||
+          finalTopEdge < minInnerTopEdgeByColumn[updateCol]
+        ) {
+          minInnerTopEdgeByColumn[updateCol] = finalTopEdge;
+        }
+      }
+    }
   })();
 
   // Final pass: enforce visual gap for left vertical legs of sub-pixel circular links.
@@ -4635,6 +5062,56 @@ export function addCircularPathData(
           c.leftSmallArcRadius = c.leftLargeArcRadius;
         }
       }
+      if (
+        link.circularLinkType === "bottom" &&
+        typeof c.targetY === "number" &&
+        typeof c.verticalFullExtent === "number" &&
+        typeof c.leftSmallArcRadius === "number"
+      ) {
+        var targetTurnFloor =
+          c.targetY +
+          c.leftSmallArcRadius +
+          c.leftLargeArcRadius +
+          gap;
+        if (c.verticalFullExtent < targetTurnFloor - 1e-6) {
+          var floorDelta = targetTurnFloor - c.verticalFullExtent;
+          c.verticalFullExtent = targetTurnFloor;
+          if (typeof c.verticalBuffer === "number") {
+            c.verticalBuffer += floorDelta;
+          }
+          c.verticalRightInnerExtent =
+            c.verticalFullExtent - c.rightLargeArcRadius;
+        }
+      }
+      syncLeft(link);
+    }
+
+    function preserveTopTargetArcCeiling(link) {
+      if (!link || link.circularLinkType !== "top") return;
+      var c = link.circularPathData;
+      if (!c ||
+          typeof c.targetY !== "number" ||
+          typeof c.verticalFullExtent !== "number" ||
+          typeof c.leftLargeArcRadius !== "number") return;
+
+      var availableSmall =
+        c.targetY - c.verticalFullExtent - c.leftLargeArcRadius;
+      if (availableSmall < 0) {
+        var lift = -availableSmall;
+        c.verticalFullExtent -= lift;
+        if (typeof c.verticalBuffer === "number") {
+          c.verticalBuffer += lift;
+        }
+        c.verticalRightInnerExtent =
+          c.verticalFullExtent + c.rightLargeArcRadius;
+        availableSmall = 0;
+      }
+      if (
+        typeof c.leftSmallArcRadius === "number" &&
+        c.leftSmallArcRadius > availableSmall
+      ) {
+        c.leftSmallArcRadius = Math.max(0, availableSmall);
+      }
       syncLeft(link);
     }
 
@@ -4665,6 +5142,67 @@ export function addCircularPathData(
       }
     }
 
+    var byBottomTarget = new Map();
+    circLinks.forEach(function(l) {
+      if (l.circularLinkType !== "bottom") return;
+      if (!l.target) return;
+      var arr = byBottomTarget.get(l.target);
+      if (!arr) { arr = []; byBottomTarget.set(l.target, arr); }
+      arr.push(l);
+    });
+
+    byBottomTarget.forEach(function(group) {
+      var nonSelf = group.filter(function(l) { return !selfLinking(l, id); });
+      if (nonSelf.length < 2) return;
+
+      var selfLoops = group.filter(function(l) { return selfLinking(l, id); });
+      var innerBoundary = -Infinity;
+      var anchor = null;
+      selfLoops.forEach(function(loop) {
+        var c = loop.circularPathData;
+        var leftEdge = c.leftFullExtent - Math.max(loop.width || 0, 1) / 2;
+        if (leftEdge > innerBoundary) innerBoundary = leftEdge;
+      });
+      if (innerBoundary === -Infinity) {
+        nonSelf.forEach(function(link) {
+          var c = link.circularPathData;
+          var rightEdge = c.leftFullExtent + Math.max(link.width || 0, 1) / 2;
+          if (rightEdge > innerBoundary) {
+            innerBoundary = rightEdge;
+            anchor = link;
+          }
+        });
+      }
+
+      if (anchor) {
+        innerBoundary =
+          anchor.circularPathData.leftFullExtent -
+          Math.max(anchor.width || 0, 1) / 2;
+        nonSelf = nonSelf.filter(function(link) {
+          return link !== anchor;
+        });
+      }
+
+      nonSelf.sort(function(a, b) {
+        var av = a.circularPathData && typeof a.circularPathData.verticalFullExtent === "number" ? a.circularPathData.verticalFullExtent : 0;
+        var bv = b.circularPathData && typeof b.circularPathData.verticalFullExtent === "number" ? b.circularPathData.verticalFullExtent : 0;
+        if (Math.abs(av - bv) > 1e-6) return av - bv;
+        var ay = a.circularPathData && typeof a.circularPathData.targetY === "number" ? a.circularPathData.targetY : 0;
+        var by = b.circularPathData && typeof b.circularPathData.targetY === "number" ? b.circularPathData.targetY : 0;
+        if (Math.abs(ay - by) > 1e-6) return by - ay;
+        return b.circularPathData.leftFullExtent - a.circularPathData.leftFullExtent;
+      });
+
+      var nextRightEdge = innerBoundary;
+      for (var pi = 0; pi < nonSelf.length; pi++) {
+        var link = nonSelf[pi];
+        var hw = Math.max(link.width || 0, 1) / 2;
+        var nextLfe = nextRightEdge - gap - hw;
+        setLeftFullExtent(link, nextLfe);
+        nextRightEdge = link.circularPathData.leftFullExtent - hw;
+      }
+    });
+
     var byBottomColumn = new Map();
     circLinks.forEach(function(l) {
       if (l.circularLinkType !== "bottom") return;
@@ -4692,6 +5230,9 @@ export function addCircularPathData(
         var at = a.target && typeof a.target.y0 === "number" ? a.target.y0 : 0;
         var bt = b.target && typeof b.target.y0 === "number" ? b.target.y0 : 0;
         if (Math.abs(at - bt) > 1e-6) return bt - at;
+        var av = a.circularPathData && typeof a.circularPathData.verticalFullExtent === "number" ? a.circularPathData.verticalFullExtent : 0;
+        var bv = b.circularPathData && typeof b.circularPathData.verticalFullExtent === "number" ? b.circularPathData.verticalFullExtent : 0;
+        if (Math.abs(av - bv) > 1e-6) return av - bv;
         var ay = a.circularPathData && typeof a.circularPathData.targetY === "number" ? a.circularPathData.targetY : 0;
         var by = b.circularPathData && typeof b.circularPathData.targetY === "number" ? b.circularPathData.targetY : 0;
         if (Math.abs(ay - by) > 1e-6) return by - ay;
@@ -4705,6 +5246,22 @@ export function addCircularPathData(
         slotC.leftLargeArcRadius = slot.leftLargeArcRadius;
         slotC.leftSmallArcRadius = slot.leftSmallArcRadius;
         syncLeft(slotLink);
+      }
+
+      var nextRightEdge = -Infinity;
+      group.forEach(function(link) {
+        var hw = Math.max(link.width || 0, 1) / 2;
+        var rightEdge = link.circularPathData.leftFullExtent + hw;
+        if (rightEdge > nextRightEdge) nextRightEdge = rightEdge;
+      });
+
+      for (var packIndex = 0; packIndex < group.length; packIndex++) {
+        var packedLink = group[packIndex];
+        var packedHW = Math.max(packedLink.width || 0, 1) / 2;
+        var packedLfe = nextRightEdge - packedHW;
+        setLeftFullExtent(packedLink, packedLfe);
+        nextRightEdge =
+          packedLink.circularPathData.leftFullExtent - packedHW - gap;
       }
     });
 
@@ -4722,6 +5279,53 @@ export function addCircularPathData(
         });
 
         var changed = false;
+        var anchorChanged = false;
+
+        // Self-loops are fixed inner anchors. Check every overlapping leg,
+        // not only the adjacent item in the current X ordering: a thin leg
+        // can sit inside a wide self-loop while another slot masks the pair.
+        for (var sli = 0; sli < group.length; sli++) {
+          var loop = group[sli];
+          if (!selfLinking(loop, id)) continue;
+          var loopC = loop.circularPathData;
+          var loopTargetY = typeof loopC.targetY === "number"
+            ? loopC.targetY
+            : (typeof loop.y1 === "number" ? loop.y1 : 0);
+          var loopVLI = typeof loopC.verticalLeftInnerExtent === "number"
+            ? loopC.verticalLeftInnerExtent
+            : loopC.verticalFullExtent;
+          var loopYMin = Math.min(loopTargetY, loopVLI);
+          var loopYMax = Math.max(loopTargetY, loopVLI);
+          var loopHW = Math.max(loop.width || 0, 1) / 2;
+          var loopLeftEdge = loopC.leftFullExtent - loopHW;
+
+          for (var nsi = 0; nsi < group.length; nsi++) {
+            var nonSelf = group[nsi];
+            if (nonSelf === loop || selfLinking(nonSelf, id)) continue;
+            var nonSelfC = nonSelf.circularPathData;
+            var nonSelfTargetY = typeof nonSelfC.targetY === "number"
+              ? nonSelfC.targetY
+              : (typeof nonSelf.y1 === "number" ? nonSelf.y1 : 0);
+            var nonSelfVLI = typeof nonSelfC.verticalLeftInnerExtent === "number"
+              ? nonSelfC.verticalLeftInnerExtent
+              : nonSelfC.verticalFullExtent;
+            var nonSelfYMin = Math.min(nonSelfTargetY, nonSelfVLI);
+            var nonSelfYMax = Math.max(nonSelfTargetY, nonSelfVLI);
+            if (Math.min(loopYMax, nonSelfYMax) <=
+                Math.max(loopYMin, nonSelfYMin) + 1e-6) continue;
+
+            var nonSelfHW = Math.max(nonSelf.width || 0, 1) / 2;
+            var maxLfe = loopLeftEdge - gap - nonSelfHW;
+            if (nonSelfC.leftFullExtent > maxLfe + 1e-6) {
+              setLeftFullExtent(nonSelf, maxLfe);
+              changed = true;
+              anchorChanged = true;
+            }
+          }
+        }
+
+        if (anchorChanged) continue;
+
         for (var i = 1; i < group.length; i++) {
           var inner = group[i];
           var ic = inner.circularPathData;
@@ -4807,70 +5411,362 @@ export function addCircularPathData(
         }
         if (!changed) break;
       }
+
+      // The generic all-pairs resolver above may move one member of a
+      // same-target BOTTOM bundle around an unrelated blocker. Restore the
+      // nesting invariant inside each bundle without changing its occupied
+      // horizontal band: inner shelf first, outer shelf last.
+      var bottomByTarget = new Map();
+      group.forEach(function(link) {
+        if (link.circularLinkType !== "bottom" ||
+            selfLinking(link, id) ||
+            !link.target) return;
+        var targetGroup = bottomByTarget.get(link.target);
+        if (!targetGroup) {
+          targetGroup = [];
+          bottomByTarget.set(link.target, targetGroup);
+        }
+        targetGroup.push(link);
+      });
+
+      bottomByTarget.forEach(function(targetGroup) {
+        if (targetGroup.length < 2) return;
+        targetGroup.sort(function(a, b) {
+          return a.circularPathData.verticalFullExtent -
+            b.circularPathData.verticalFullExtent;
+        });
+
+        var nextRightEdge = -Infinity;
+        targetGroup.forEach(function(link) {
+          var hw = Math.max(link.width || 0, 1) / 2;
+          var rightEdge = link.circularPathData.leftFullExtent + hw;
+          if (rightEdge > nextRightEdge) nextRightEdge = rightEdge;
+        });
+
+        targetGroup.forEach(function(link) {
+          var hw = Math.max(link.width || 0, 1) / 2;
+          var proposedRightEdge = nextRightEdge;
+          var bottomC = link.circularPathData;
+          var bottomYMin = Math.min(
+            bottomC.targetY,
+            bottomC.verticalLeftInnerExtent
+          );
+          var bottomYMax = Math.max(
+            bottomC.targetY,
+            bottomC.verticalLeftInnerExtent
+          );
+          var otherBottomBlockers = group.filter(function(candidate) {
+            if (candidate === link ||
+                candidate.circularLinkType !== "bottom" ||
+                candidate.target === link.target) return false;
+            var blockerC = candidate.circularPathData;
+            var blockerYMin = Math.min(
+              blockerC.targetY,
+              blockerC.verticalLeftInnerExtent
+            );
+            var blockerYMax = Math.max(
+              blockerC.targetY,
+              blockerC.verticalLeftInnerExtent
+            );
+            return Math.min(bottomYMax, blockerYMax) >
+              Math.max(bottomYMin, blockerYMin) + 1e-6;
+          }).sort(function(a, b) {
+            var aHW = Math.max(a.width || 0, 1) / 2;
+            var bHW = Math.max(b.width || 0, 1) / 2;
+            return (b.circularPathData.leftFullExtent + bHW) -
+              (a.circularPathData.leftFullExtent + aHW);
+          });
+
+          otherBottomBlockers.forEach(function(blocker) {
+            var blockerC = blocker.circularPathData;
+            var blockerHW = Math.max(blocker.width || 0, 1) / 2;
+            var blockerLeftEdge = blockerC.leftFullExtent - blockerHW;
+            var blockerRightEdge = blockerC.leftFullExtent + blockerHW;
+            var proposedLeftEdge = proposedRightEdge - 2 * hw;
+            if (
+              proposedRightEdge > blockerLeftEdge - gap + 1e-6 &&
+              proposedLeftEdge < blockerRightEdge + gap - 1e-6
+            ) {
+              proposedRightEdge = blockerLeftEdge - gap;
+            }
+          });
+
+          var topBlockers = group.filter(function(candidate) {
+            if (candidate.circularLinkType !== "top") return false;
+            var blockerC = candidate.circularPathData;
+            var blockerYMin = Math.min(
+              blockerC.targetY,
+              blockerC.verticalLeftInnerExtent
+            );
+            var blockerYMax = Math.max(
+              blockerC.targetY,
+              blockerC.verticalLeftInnerExtent
+            );
+            return Math.min(bottomYMax, blockerYMax) >
+              Math.max(bottomYMin, blockerYMin) + 1e-6;
+          }).sort(function(a, b) {
+            var aHW = Math.max(a.width || 0, 1) / 2;
+            var bHW = Math.max(b.width || 0, 1) / 2;
+            return (b.circularPathData.leftFullExtent + bHW) -
+              (a.circularPathData.leftFullExtent + aHW);
+          });
+
+          topBlockers.forEach(function(blocker) {
+            var blockerC = blocker.circularPathData;
+            var blockerHW = Math.max(blocker.width || 0, 1) / 2;
+            var blockerLeftEdge = blockerC.leftFullExtent - blockerHW;
+            var blockerRightEdge = blockerC.leftFullExtent + blockerHW;
+            var proposedLeftEdge = proposedRightEdge - 2 * hw;
+            if (
+              proposedRightEdge > blockerLeftEdge - gap + 1e-6 &&
+              proposedLeftEdge < blockerRightEdge + gap - 1e-6
+            ) {
+              proposedRightEdge = blockerLeftEdge - gap;
+            }
+          });
+
+          setLeftFullExtent(link, proposedRightEdge - hw);
+          nextRightEdge =
+            link.circularPathData.leftFullExtent - hw - gap;
+        });
+      });
+
+      // TOP bundles use the inverse shelf direction: the larger VFE is inner,
+      // while the smaller VFE is outer. Keep that order on the left legs so
+      // target-side arcs do not cross before reaching adjacent target ports.
+      var topByTarget = new Map();
+      group.forEach(function(link) {
+        if (link.circularLinkType !== "top" ||
+            selfLinking(link, id) ||
+            !link.target) return;
+        var targetGroup = topByTarget.get(link.target);
+        if (!targetGroup) {
+          targetGroup = [];
+          topByTarget.set(link.target, targetGroup);
+        }
+        targetGroup.push(link);
+      });
+
+      var currentTopLinks = [];
+      topByTarget.forEach(function(targetGroup) {
+        currentTopLinks = currentTopLinks.concat(targetGroup);
+      });
+      currentTopLinks.sort(function(a, b) {
+        return b.circularPathData.leftFullExtent -
+          a.circularPathData.leftFullExtent;
+      });
+
+      var orderedTopGroups = [];
+      var orderedTopByTarget = new Map();
+      currentTopLinks.forEach(function(link) {
+        var targetGroup = orderedTopByTarget.get(link.target);
+        if (!targetGroup) {
+          targetGroup = [];
+          orderedTopByTarget.set(link.target, targetGroup);
+          orderedTopGroups.push(targetGroup);
+        }
+        targetGroup.push(link);
+      });
+
+      var orderedTopLinks = [];
+      orderedTopGroups.forEach(function(targetGroup) {
+        targetGroup.sort(function(a, b) {
+          return b.circularPathData.verticalFullExtent -
+            a.circularPathData.verticalFullExtent;
+        });
+        orderedTopLinks = orderedTopLinks.concat(targetGroup);
+      });
+
+      var nextTopRightEdge = -Infinity;
+      currentTopLinks.forEach(function(link) {
+        var hw = Math.max(link.width || 0, 1) / 2;
+        var rightEdge = link.circularPathData.leftFullExtent + hw;
+        if (rightEdge > nextTopRightEdge) nextTopRightEdge = rightEdge;
+      });
+
+      var bottomBlockers = group.filter(function(link) {
+        return link.circularLinkType === "bottom";
+      }).sort(function(a, b) {
+        var aHW = Math.max(a.width || 0, 1) / 2;
+        var bHW = Math.max(b.width || 0, 1) / 2;
+        return (b.circularPathData.leftFullExtent + bHW) -
+          (a.circularPathData.leftFullExtent + aHW);
+      });
+
+      orderedTopLinks.forEach(function(link) {
+        var hw = Math.max(link.width || 0, 1) / 2;
+        var proposedRightEdge = nextTopRightEdge;
+        var topC = link.circularPathData;
+        var topYMin = Math.min(topC.targetY, topC.verticalFullExtent);
+        var topYMax = Math.max(topC.targetY, topC.verticalFullExtent);
+
+        bottomBlockers.forEach(function(blocker) {
+          var blockerC = blocker.circularPathData;
+          var blockerYMin = Math.min(
+            blockerC.targetY,
+            blockerC.verticalLeftInnerExtent
+          );
+          var blockerYMax = Math.max(
+            blockerC.targetY,
+            blockerC.verticalLeftInnerExtent
+          );
+          if (
+            Math.min(topYMax, blockerYMax) <=
+            Math.max(topYMin, blockerYMin) + 1e-6
+          ) return;
+
+          var blockerHW = Math.max(blocker.width || 0, 1) / 2;
+          var blockerLeftEdge =
+            blockerC.leftFullExtent - blockerHW;
+          var blockerRightEdge =
+            blockerC.leftFullExtent + blockerHW;
+          var proposedLeftEdge = proposedRightEdge - 2 * hw;
+          if (
+            proposedRightEdge > blockerLeftEdge - gap + 1e-6 &&
+            proposedLeftEdge < blockerRightEdge + gap - 1e-6
+          ) {
+            proposedRightEdge = blockerLeftEdge - gap;
+          }
+        });
+
+        setLeftFullExtent(link, proposedRightEdge - hw);
+        preserveTopTargetArcCeiling(link);
+        nextTopRightEdge =
+          link.circularPathData.leftFullExtent - hw - gap;
+      });
+
+      // Target-bundle repacking above can move a link back inside a self-loop
+      // that the generic resolver had already cleared. Re-assert the fixed
+      // self-loop anchor here, moving the affected target bundle atomically.
+      var finalSelfLoops = group.filter(function(link) {
+        return selfLinking(link, id);
+      });
+      finalSelfLoops.forEach(function(loop) {
+        var loopC = loop.circularPathData;
+        var loopYMin = Math.min(
+          loopC.targetY,
+          loopC.verticalLeftInnerExtent
+        );
+        var loopYMax = Math.max(
+          loopC.targetY,
+          loopC.verticalLeftInnerExtent
+        );
+        var loopHW = Math.max(loop.width || 0, 1) / 2;
+        var loopLeftEdge = loopC.leftFullExtent - loopHW;
+        var affectedBundles = new Map();
+        var maxDeficit = 0;
+
+        group.forEach(function(link) {
+          if (link === loop || selfLinking(link, id)) return;
+          var c = link.circularPathData;
+          var linkYMin = Math.min(c.targetY, c.verticalLeftInnerExtent);
+          var linkYMax = Math.max(c.targetY, c.verticalLeftInnerExtent);
+          if (
+            Math.min(loopYMax, linkYMax) <=
+            Math.max(loopYMin, linkYMin) + 1e-6
+          ) return;
+
+          var hw = Math.max(link.width || 0, 1) / 2;
+          var rightEdge = c.leftFullExtent + hw;
+          var deficit = rightEdge + gap - loopLeftEdge;
+          var bundleKey =
+            String(link.circularLinkType) + "|" +
+            String(link.target && link.target.index);
+          if (!affectedBundles.has(bundleKey)) {
+            affectedBundles.set(bundleKey, {
+              target: link.target,
+              type: link.circularLinkType
+            });
+          }
+          maxDeficit = Math.max(maxDeficit, deficit);
+        });
+
+        if (maxDeficit <= 1e-6) return;
+
+        // Use one common shift so the already-resolved spacing between
+        // different target bundles is preserved instead of aligning all
+        // their right edges against the self-loop.
+        affectedBundles.forEach(function(bundle) {
+          group.forEach(function(link) {
+            if (
+              selfLinking(link, id) ||
+              link.target !== bundle.target ||
+              link.circularLinkType !== bundle.type
+            ) return;
+            setLeftFullExtent(
+              link,
+              link.circularPathData.leftFullExtent - maxDeficit
+            );
+            preserveTopTargetArcCeiling(link);
+          });
+        });
+
+        var packedBundles = Array.from(affectedBundles.values()).map(
+          function(bundle) {
+            var links = group.filter(function(link) {
+              return (
+                !selfLinking(link, id) &&
+                link.target === bundle.target &&
+                link.circularLinkType === bundle.type
+              );
+            });
+            return {
+              bundle: bundle,
+              links: links,
+              rightEdge: Math.max.apply(
+                null,
+                links.map(function(link) {
+                  return (
+                    link.circularPathData.leftFullExtent +
+                    Math.max(link.width || 0, 1) / 2
+                  );
+                })
+              )
+            };
+          }
+        ).sort(function(a, b) {
+          if (Math.abs(b.rightEdge - a.rightEdge) >= 1e-6) {
+            return b.rightEdge - a.rightEdge;
+          }
+          return (
+            (a.bundle.target && a.bundle.target.index) -
+            (b.bundle.target && b.bundle.target.index)
+          );
+        });
+        var nextBundleRightEdge = loopLeftEdge - gap;
+        packedBundles.forEach(function(packed) {
+          var bundleShift = Math.max(
+            0,
+            packed.rightEdge - nextBundleRightEdge
+          );
+          packed.links.forEach(function(link) {
+            if (bundleShift > 1e-6) {
+              setLeftFullExtent(
+                link,
+                link.circularPathData.leftFullExtent - bundleShift
+              );
+              preserveTopTargetArcCeiling(link);
+            }
+          });
+          nextBundleRightEdge =
+            Math.min.apply(
+              null,
+              packed.links.map(function(link) {
+                return (
+                  link.circularPathData.leftFullExtent -
+                  Math.max(link.width || 0, 1) / 2
+                );
+              })
+            ) - gap;
+        });
+      });
+
       // Clearance is now final for this target column. If a backlink wraps
       // around its own target's self-loop, restore the concentric target turn
       // that earlier radius compaction may have flattened.
       group.forEach(function(link) {
         roundLeftTurnAroundTargetSelfLoop(link, group);
       });
-    });
-
-    var byBottomTarget = new Map();
-    circLinks.forEach(function(l) {
-      if (l.circularLinkType !== "bottom") return;
-      if (!l.target) return;
-      var arr = byBottomTarget.get(l.target);
-      if (!arr) { arr = []; byBottomTarget.set(l.target, arr); }
-      arr.push(l);
-    });
-
-    byBottomTarget.forEach(function(group) {
-      var nonSelf = group.filter(function(l) { return !selfLinking(l, id); });
-      if (nonSelf.length < 2) return;
-
-      var selfLoops = group.filter(function(l) { return selfLinking(l, id); });
-      var innerBoundary = -Infinity;
-      var anchor = null;
-      selfLoops.forEach(function(loop) {
-        var c = loop.circularPathData;
-        var leftEdge = c.leftFullExtent - Math.max(loop.width || 0, 1) / 2;
-        if (leftEdge > innerBoundary) innerBoundary = leftEdge;
-      });
-      if (innerBoundary === -Infinity) {
-        nonSelf.forEach(function(link) {
-          var c = link.circularPathData;
-          var rightEdge = c.leftFullExtent + Math.max(link.width || 0, 1) / 2;
-          if (rightEdge > innerBoundary) {
-            innerBoundary = rightEdge;
-            anchor = link;
-          }
-        });
-      }
-
-      if (anchor) {
-        innerBoundary =
-          anchor.circularPathData.leftFullExtent -
-          Math.max(anchor.width || 0, 1) / 2;
-        nonSelf = nonSelf.filter(function(link) {
-          return link !== anchor;
-        });
-      }
-
-      nonSelf.sort(function(a, b) {
-        var ay = a.circularPathData && typeof a.circularPathData.targetY === "number" ? a.circularPathData.targetY : 0;
-        var by = b.circularPathData && typeof b.circularPathData.targetY === "number" ? b.circularPathData.targetY : 0;
-        if (Math.abs(ay - by) > 1e-6) return by - ay;
-        return b.circularPathData.leftFullExtent - a.circularPathData.leftFullExtent;
-      });
-
-      var nextRightEdge = innerBoundary;
-      for (var pi = 0; pi < nonSelf.length; pi++) {
-        var link = nonSelf[pi];
-        var hw = Math.max(link.width || 0, 1) / 2;
-        var nextLfe = nextRightEdge - gap - hw;
-        setLeftFullExtent(link, nextLfe);
-        nextRightEdge = link.circularPathData.leftFullExtent - hw;
-      }
     });
 
   })();

@@ -106,6 +106,7 @@ function makeChart() {
     links: {
       data: links.map((link) => ({ ...link })),
       circularGap: 1,
+      costBasedCircularRouting: false,
       circularLinkPortionTopBottom: 0.4,
       circularLinkPortionLeftRight: 0.1,
       useVirtualRoutes: true,

@@ -112,3 +112,6 @@ typings/
 
 # HTML pages containing booking-related debug/fixtures (purged from repo history)
 test-height.html
+
+# Local root-level HTML fixtures (excluded from repository history)
+/*.html

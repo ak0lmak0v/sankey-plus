@@ -498,6 +498,21 @@ export function sortTargetLinks(inputGraph, id, typeOrder, typeAccessor) {
           var w2 = link2.width || 0;
 
           if (link1.circularLinkType === "bottom") {
+            // Once circular shelves have been calculated, their nesting is the
+            // authoritative target-port order. Ports are assigned bottom->top,
+            // so inner shelves (smaller VFE) enter lower and outer shelves
+            // (larger VFE) enter progressively higher.
+            var vfe1 = link1.circularPathData &&
+              link1.circularPathData.verticalFullExtent;
+            var vfe2 = link2.circularPathData &&
+              link2.circularPathData.verticalFullExtent;
+            if (
+              typeof vfe1 === "number" &&
+              typeof vfe2 === "number" &&
+              Math.abs(vfe1 - vfe2) >= 1e-6
+            ) {
+              return vfe1 - vfe2;
+            }
             // Bottom-band ports are assigned bottom->top (first in array = bottommost).
             // Keep the semantic nesting order primary: shorter/local links stay lower,
             // longer backlinks enter above them.  `leftFullExtent` is only a late
@@ -514,6 +529,20 @@ export function sortTargetLinks(inputGraph, id, typeOrder, typeAccessor) {
               return lfe2 - lfe1;
             }
           } else {
+            // TOP-band ports are assigned top->bottom. Match the inverse of
+            // the shelf order: inner shelves have larger VFE and enter higher,
+            // while outer shelves wrap around them and enter lower.
+            var topVfe1 = link1.circularPathData &&
+              link1.circularPathData.verticalFullExtent;
+            var topVfe2 = link2.circularPathData &&
+              link2.circularPathData.verticalFullExtent;
+            if (
+              typeof topVfe1 === "number" &&
+              typeof topVfe2 === "number" &&
+              Math.abs(topVfe1 - topVfe2) >= 1e-6
+            ) {
+              return topVfe2 - topVfe1;
+            }
             if (d1 !== d2) return d1 - d2;
             if (s1 !== s2) return s1 - s2;
             if (w1 !== w2) return w1 - w2;

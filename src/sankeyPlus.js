@@ -316,7 +316,27 @@ function identifyCircles(inputGraph, sortNodes) {
 // Assign a circular link type (top or bottom), based on:
 // - if the source/target node already has circular links, then use the same type
 // - if not, choose the type with fewer links
-function selectCircularLinkTypes(inputGraph, id) {
+export function scoreCircularRouteCost(components) {
+  return (
+    components.distance +
+    6 * components.columnLoad +
+    6 * components.totalLoad +
+    4 * components.direction +
+    0.05 * components.nodeHint +
+    0.35 * components.crossings
+  );
+}
+
+export function circularRouteDistanceWeight(span) {
+  return span === 1 ? 1.8 : 1;
+}
+
+function selectCircularLinkTypes(
+  inputGraph,
+  id,
+  circularGap,
+  useCostBasedRouting
+) {
   let graph = inputGraph;
 
   // Optional debug: keep a per-link trace of circularLinkType changes across passes.
@@ -725,6 +745,282 @@ function selectCircularLinkTypes(inputGraph, id) {
       links[k].circularLinkType = preferred;
     }
   });
+
+  // Cost-based routing for backward circular links. The earlier passes provide
+  // a stable seed, then this optimizer is authoritative for every bundle that
+  // does not have an explicit input-level override.
+  (function optimizeBacklinkRoutingByCost() {
+    if (!useCostBasedRouting) return;
+    var backlinks = graph.links.filter(function (link) {
+      if (!link || !link.circular || selfLinking(link, id)) return false;
+      if (!link.source || !link.target) return false;
+      return (link.target.column || 0) < (link.source.column || 0);
+    });
+    if (!backlinks.length) return;
+    var hasFinalGeometry = backlinks.every(function (link) {
+      return (
+        typeof link.source.column === "number" &&
+        typeof link.target.column === "number" &&
+        Number.isFinite(link.source.y0) &&
+        Number.isFinite(link.source.y1) &&
+        Number.isFinite(link.target.y0) &&
+        Number.isFinite(link.target.y1)
+      );
+    });
+    if (!hasFinalGeometry) return;
+
+    var gap = Math.max(0, Number(circularGap) || 0);
+    var height = Math.max(1, (graph.y1 || 0) - (graph.y0 || 0));
+    var topLoad = {};
+    var bottomLoad = {};
+    var topTotalLoad = 0;
+    var bottomTotalLoad = 0;
+
+    function visibleWidth(link) {
+      return Math.max(link.width || 0, 1) + gap;
+    }
+
+    function eachSpannedColumn(link, callback) {
+      var sourceCol =
+        link.source && typeof link.source.column === "number"
+          ? link.source.column
+          : 0;
+      var targetCol =
+        link.target && typeof link.target.column === "number"
+          ? link.target.column
+          : sourceCol;
+      var first = Math.min(sourceCol, targetCol);
+      var last = Math.max(sourceCol, targetCol);
+      for (var col = first; col <= last; col++) callback(col);
+    }
+
+    function changeLoad(link, side, direction) {
+      var loads = side === "top" ? topLoad : bottomLoad;
+      var amount = visibleWidth(link) * direction;
+      if (side === "top") {
+        topTotalLoad = Math.max(0, topTotalLoad + amount);
+      } else {
+        bottomTotalLoad = Math.max(0, bottomTotalLoad + amount);
+      }
+      eachSpannedColumn(link, function (col) {
+        loads[col] = Math.max(0, (loads[col] || 0) + amount);
+      });
+    }
+
+    graph.links.forEach(function (link) {
+      if (!link || !link.circular || selfLinking(link, id)) return;
+      if (link.circularLinkType !== "top" &&
+          link.circularLinkType !== "bottom") return;
+      changeLoad(link, link.circularLinkType, 1);
+    });
+
+    var bundlesByKey = new Map();
+    backlinks.forEach(function (link) {
+      var key =
+        String(link.source.column) + "|" + getNodeID(link.target, id);
+      var bundle = bundlesByKey.get(key);
+      if (!bundle) {
+        bundle = {
+          key: key,
+          links: [],
+          sourceColumn: link.source.column || 0,
+          target: link.target,
+          firstIndex:
+            typeof link.index === "number" ? link.index : Infinity
+        };
+        bundlesByKey.set(key, bundle);
+      }
+      bundle.links.push(link);
+      if (
+        typeof link.index === "number" &&
+        link.index < bundle.firstIndex
+      ) {
+        bundle.firstIndex = link.index;
+      }
+    });
+
+    var bundles = Array.from(bundlesByKey.values());
+    bundles.forEach(function (bundle) {
+      bundle.totalWidth = bundle.links.reduce(function (total, link) {
+        return total + visibleWidth(link);
+      }, 0);
+      bundle.maxSpan = bundle.links.reduce(function (maxSpan, link) {
+        var span = Math.abs(
+          (link.source.column || 0) - (link.target.column || 0)
+        );
+        return Math.max(maxSpan, span);
+      }, 0);
+      var weightedSourceY = 0;
+      var weightedTargetY = 0;
+      bundle.links.forEach(function (link) {
+        var weight = visibleWidth(link);
+        weightedSourceY +=
+          ((link.source.y0 + link.source.y1) / 2) * weight;
+        weightedTargetY +=
+          ((link.target.y0 + link.target.y1) / 2) * weight;
+      });
+      bundle.sourceY = weightedSourceY / bundle.totalWidth;
+      bundle.targetY = weightedTargetY / bundle.totalWidth;
+    });
+    bundles.sort(function (a, b) {
+      if (a.maxSpan !== b.maxSpan) return b.maxSpan - a.maxSpan;
+      if (Math.abs(a.totalWidth - b.totalWidth) > 1e-6) {
+        return b.totalWidth - a.totalWidth;
+      }
+      return a.firstIndex - b.firstIndex;
+    });
+
+    var assignedBundles = [];
+
+    function averageLoad(link, side) {
+      var loads = side === "top" ? topLoad : bottomLoad;
+      var total = 0;
+      var count = 0;
+      eachSpannedColumn(link, function (col) {
+        total += loads[col] || 0;
+        count++;
+      });
+      return count ? total / count : 0;
+    }
+
+    function crossingPenalty(bundle, side) {
+      var penalty = 0;
+      assignedBundles.forEach(function (other) {
+        if (other.sourceColumn !== bundle.sourceColumn) return;
+        var upper = other.sourceY <= bundle.sourceY ? other : bundle;
+        var lower = upper === other ? bundle : other;
+        var upperSide = upper === bundle ? side : other.chosenSide;
+        var lowerSide = lower === bundle ? side : other.chosenSide;
+        if (upperSide === "bottom" && lowerSide === "top") {
+          penalty += 1;
+        }
+      });
+      return penalty;
+    }
+
+    function routeCost(bundle, side) {
+      var distanceCost = 0;
+      var loadCost = 0;
+      var directionCost = 0;
+      var nodeHintCost = 0;
+
+      bundle.links.forEach(function (link) {
+        var weight = visibleWidth(link);
+        var sourceY = (link.source.y0 + link.source.y1) / 2;
+        var targetY = (link.target.y0 + link.target.y1) / 2;
+        var topDetour =
+          Math.max(0, sourceY - graph.y0) +
+          Math.max(0, targetY - graph.y0);
+        var bottomDetour =
+          Math.max(0, graph.y1 - sourceY) +
+          Math.max(0, graph.y1 - targetY);
+        var span = Math.abs(
+          (link.source.column || 0) - (link.target.column || 0)
+        );
+        var localDistanceWeight = circularRouteDistanceWeight(span);
+        distanceCost +=
+          weight *
+          (side === "top" ? topDetour : bottomDetour) /
+          height *
+          localDistanceWeight;
+
+        loadCost +=
+          weight * averageLoad(link, side) / height;
+
+        var verticalDelta = targetY - sourceY;
+        if (
+          (side === "top" && verticalDelta > 0) ||
+          (side === "bottom" && verticalDelta < 0)
+        ) {
+          directionCost +=
+            weight * Math.abs(verticalDelta) / height;
+        }
+
+        var sourceHint = link.source.circularLinkType;
+        var targetHint = link.target.circularLinkType;
+        if (sourceHint && sourceHint !== side) nodeHintCost += weight;
+        if (targetHint && targetHint !== side) nodeHintCost += weight * 0.5;
+      });
+
+      var normalizer = Math.max(bundle.totalWidth, 1);
+      var rawCrossings = crossingPenalty(bundle, side);
+      var topCorridorLimit = graph.y0 + height * 0.6;
+      var fitsTopCorridor =
+        bundle.sourceY <= topCorridorLimit &&
+        bundle.targetY <= topCorridorLimit;
+      var directCorridorSide = fitsTopCorridor ? "top" : null;
+      var usesDirectCorridor = side === directCorridorSide;
+      var components = {
+        distance:
+          (distanceCost / normalizer) *
+          (usesDirectCorridor ? 0.9 : 1),
+        columnLoad: loadCost / normalizer,
+        totalLoad:
+          (side === "top" ? topTotalLoad : bottomTotalLoad) / height,
+        direction:
+          (directionCost / normalizer) *
+          (usesDirectCorridor ? 0.05 : 1),
+        nodeHint:
+          (nodeHintCost / normalizer) *
+          (usesDirectCorridor ? 0 : 1),
+        // If both endpoints fit the lightly expanded upper corridor,
+        // the direct wrap is visually unambiguous. The final cross-band
+        // clearance phase handles the actual source-leg separation.
+        crossings:
+          usesDirectCorridor
+            ? 0
+            : rawCrossings
+      };
+      if (!bundle.costComponents) bundle.costComponents = {};
+      bundle.costComponents[side] = components;
+      return scoreCircularRouteCost(components);
+    }
+
+    bundles.forEach(function (bundle) {
+      bundle.links.forEach(function (link) {
+        changeLoad(link, link.circularLinkType, -1);
+      });
+
+      var explicitSide = null;
+      var explicitConflict = false;
+      bundle.links.forEach(function (link) {
+        if (
+          link._forceCircularLinkType !== "top" &&
+          link._forceCircularLinkType !== "bottom"
+        ) return;
+        if (explicitSide && explicitSide !== link._forceCircularLinkType) {
+          explicitConflict = true;
+        }
+        explicitSide = link._forceCircularLinkType;
+      });
+
+      var topCost = routeCost(bundle, "top");
+      var bottomCost = routeCost(bundle, "bottom");
+      var chosenSide;
+      if (explicitSide && !explicitConflict) {
+        chosenSide = explicitSide;
+      } else if (Math.abs(topCost - bottomCost) <= 1e-9) {
+        chosenSide =
+          bundle.links[0].circularLinkType === "top" ? "top" : "bottom";
+      } else {
+        chosenSide = topCost < bottomCost ? "top" : "bottom";
+      }
+
+      bundle.links.forEach(function (link) {
+        link.circularLinkType = chosenSide;
+        link._circularRoutingCost = {
+          top: topCost,
+          bottom: bottomCost,
+          chosen: chosenSide,
+          components: bundle.costComponents
+        };
+        trace(link, "cost/backlink-bundle/" + chosenSide);
+        changeLoad(link, chosenSide, 1);
+      });
+      bundle.chosenSide = chosenSide;
+      assignedBundles.push(bundle);
+    });
+  })();
   
   // Second pass: determine types for self-links based on other circular links of the same node
   graph.links.forEach(function (link) {
@@ -797,7 +1093,23 @@ function synchronizeBidirectionalLinks(inputGraph, id) {
       // Found a pair - synchronize their types
       // Use the type of the link with larger value, or "top" if equal
       var preferredType;
-      if (link.value > reverseLink.value) {
+      var linkForce =
+        link._forceCircularLinkType === "top" ||
+        link._forceCircularLinkType === "bottom"
+          ? link._forceCircularLinkType
+          : null;
+      var reverseForce =
+        reverseLink._forceCircularLinkType === "top" ||
+        reverseLink._forceCircularLinkType === "bottom"
+          ? reverseLink._forceCircularLinkType
+          : null;
+      if (linkForce && reverseForce && linkForce !== reverseForce) {
+        processedPairs.add(linkId);
+        processedPairs.add(reverseLinkId);
+        return;
+      } else if (linkForce || reverseForce) {
+        preferredType = linkForce || reverseForce;
+      } else if (link.value > reverseLink.value) {
         preferredType = link.circularLinkType;
       } else if (reverseLink.value > link.value) {
         preferredType = reverseLink.circularLinkType;
@@ -1878,6 +2190,7 @@ class SankeyChart {
       },
       links: {
         circularGap: 5,
+        costBasedCircularRouting: true,
         circularLinkPortionTopBottom: 0.4,
         circularLinkPortionLeftRight: 0.1,
         opacity: 1,
@@ -2030,7 +2343,12 @@ class SankeyChart {
     this.graph.py = 0;
 
     this.graph = identifyCircles(this.graph, sortNodes);
-    this.graph = selectCircularLinkTypes(this.graph, this.config.id);
+    this.graph = selectCircularLinkTypes(
+      this.graph,
+      this.config.id,
+      this.config.links.circularGap,
+      this.config.links.costBasedCircularRouting
+    );
     this.graph = synchronizeBidirectionalLinks(this.graph, this.config.id);
     _captureBacklinkStage("after/selectCircularLinkTypes#1");
 
@@ -2100,7 +2418,12 @@ class SankeyChart {
     _captureBacklinkStage("after/computeNodeBreadths#1");
     
     // Recalculate circular link types based on final node positions
-    this.graph = selectCircularLinkTypes(this.graph, this.config.id);
+    this.graph = selectCircularLinkTypes(
+      this.graph,
+      this.config.id,
+      this.config.links.circularGap,
+      this.config.links.costBasedCircularRouting
+    );
     // Synchronize bidirectional circular links to prevent overlap
     this.graph = synchronizeBidirectionalLinks(this.graph, this.config.id);
     _captureBacklinkStage("after/selectCircularLinkTypes#2");

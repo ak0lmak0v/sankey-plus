@@ -44,6 +44,7 @@ test("regression (bottom/search): schedule ○→search ● must not overlap sch
     links: {
       data: links.map((l) => ({ ...l })),
       circularGap: 1,
+      costBasedCircularRouting: false,
       circularLinkPortionTopBottom: 0.4,
       circularLinkPortionLeftRight: 0.1,
       useVirtualRoutes: true,
@@ -155,6 +156,7 @@ test("regression (bottom): schedule ○→search ◐ must not overlap schedule �
     links: {
       data: links.map((l) => ({ ...l })),
       circularGap: 1,
+      costBasedCircularRouting: false,
       circularLinkPortionTopBottom: 0.4,
       circularLinkPortionLeftRight: 0.1,
       useVirtualRoutes: true,
@@ -201,6 +203,7 @@ test("regression (bottom): schedule ○→listing ○ must not overlap schedule 
     links: {
       data: links.map((l) => ({ ...l })),
       circularGap: 1,
+      costBasedCircularRouting: false,
       circularLinkPortionTopBottom: 0.4,
       circularLinkPortionLeftRight: 0.1,
       useVirtualRoutes: true,

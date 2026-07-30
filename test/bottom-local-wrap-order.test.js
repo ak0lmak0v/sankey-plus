@@ -45,6 +45,7 @@ test("bottom local nesting: listing ○→search ● should wrap around autosear
     links: {
       data: linksRaw.map((l) => ({ ...l })),
       circularGap: 1,
+      costBasedCircularRouting: false,
       circularLinkPortionTopBottom: 0.4,
       circularLinkPortionLeftRight: 0.1,
       useVirtualRoutes: true,
@@ -119,6 +120,7 @@ test("bottom local bundle: listing ○→search ● and autosearch→search ● 
     links: {
       data: linksRaw.map((l) => ({ ...l })),
       circularGap: 1,
+      costBasedCircularRouting: false,
       circularLinkPortionTopBottom: 0.4,
       circularLinkPortionLeftRight: 0.1,
       useVirtualRoutes: true,

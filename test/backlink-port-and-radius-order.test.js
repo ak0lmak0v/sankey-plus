@@ -51,6 +51,7 @@ function makeChart() {
     links: {
       data: linksData,
       circularGap: 1,
+      costBasedCircularRouting: false,
       circularLinkPortionTopBottom: 0.4,
       circularLinkPortionLeftRight: 0.1,
       useVirtualRoutes: true,
