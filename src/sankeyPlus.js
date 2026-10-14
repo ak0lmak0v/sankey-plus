@@ -355,6 +355,7 @@ function selectCircularLinkTypes(
   // Reset any per-run forced routing hints
   graph.links.forEach(function (l) {
     if (l && l._forcedCircularLinkType) delete l._forcedCircularLinkType;
+    if (l) delete l._targetOrderRerouted;
   });
 
   let numberOfTops = 0;
@@ -898,6 +899,22 @@ function selectCircularLinkTypes(
       return penalty;
     }
 
+    // Strictly interleaved backlink intervals cannot form nested U-routes
+    // on one side: moving either shelf away from one leg crosses the other.
+    // Include these conflicts in the route cost. Either corridor can already
+    // have interleavings, so a raw count must not override all geometry costs.
+    function interleavedCrossings(bundle, side) {
+      var count = 0;
+      assignedBundles.forEach(function (other) {
+        if (other.chosenSide !== side) return;
+        var a0 = bundle.target.column, a1 = bundle.sourceColumn;
+        var b0 = other.target.column, b1 = other.sourceColumn;
+        if ((a0 < b0 && b0 < a1 && a1 < b1) ||
+            (b0 < a0 && a0 < b1 && b1 < a1)) count++;
+      });
+      return count;
+    }
+
     function routeCost(bundle, side) {
       var distanceCost = 0;
       var loadCost = 0;
@@ -944,6 +961,7 @@ function selectCircularLinkTypes(
 
       var normalizer = Math.max(bundle.totalWidth, 1);
       var rawCrossings = crossingPenalty(bundle, side);
+      var interleavings = interleavedCrossings(bundle, side);
       var topCorridorLimit = graph.y0 + height * 0.6;
       var fitsTopCorridor =
         bundle.sourceY <= topCorridorLimit &&
@@ -967,9 +985,7 @@ function selectCircularLinkTypes(
         // the direct wrap is visually unambiguous. The final cross-band
         // clearance phase handles the actual source-leg separation.
         crossings:
-          usesDirectCorridor
-            ? 0
-            : rawCrossings
+          interleavings + (usesDirectCorridor ? 0 : rawCrossings)
       };
       if (!bundle.costComponents) bundle.costComponents = {};
       bundle.costComponents[side] = components;
@@ -996,9 +1012,15 @@ function selectCircularLinkTypes(
 
       var topCost = routeCost(bundle, "top");
       var bottomCost = routeCost(bundle, "bottom");
+      var topInterleavings = interleavedCrossings(bundle, "top");
+      var bottomInterleavings = interleavedCrossings(bundle, "bottom");
       var chosenSide;
       if (explicitSide && !explicitConflict) {
         chosenSide = explicitSide;
+      } else if ((topInterleavings === 0) !== (bottomInterleavings === 0)) {
+        // Use a conflict-free side when available. If both sides are busy,
+        // compare the full costs instead of choosing solely by link count.
+        chosenSide = topInterleavings === 0 ? "top" : "bottom";
       } else if (Math.abs(topCost - bottomCost) <= 1e-9) {
         chosenSide =
           bundle.links[0].circularLinkType === "top" ? "top" : "bottom";
@@ -1019,6 +1041,187 @@ function selectCircularLinkTypes(
       });
       bundle.chosenSide = chosenSide;
       assignedBundles.push(bundle);
+    });
+
+    // Greedy choices can strand a later route on an already occupied side.
+    // Assign an entire connected conflict component together when its strict
+    // interval interleavings admit two corridors. Keep the cost-based fallback
+    // for odd cycles and incompatible explicit side overrides.
+    var neighbors = bundles.map(function () { return []; });
+    for (var i = 0; i < bundles.length; i++) {
+      for (var j = i + 1; j < bundles.length; j++) {
+        var a0 = bundles[i].target.column, a1 = bundles[i].sourceColumn;
+        var b0 = bundles[j].target.column, b1 = bundles[j].sourceColumn;
+        if ((a0 < b0 && b0 < a1 && a1 < b1) ||
+            (b0 < a0 && a0 < b1 && b1 < a1)) {
+          neighbors[i].push(j);
+          neighbors[j].push(i);
+        }
+      }
+    }
+    var colors = new Map();
+    bundles.forEach(function (_, start) {
+      if (colors.has(start)) return;
+      var component = [start];
+      var possible = true;
+      colors.set(start, 0);
+      for (var q = 0; q < component.length; q++) {
+        var current = component[q];
+        neighbors[current].forEach(function (next) {
+          var wanted = 1 - colors.get(current);
+          if (!colors.has(next)) {
+            colors.set(next, wanted);
+            component.push(next);
+          } else if (colors.get(next) !== wanted) possible = false;
+        });
+      }
+      if (!possible || component.length < 2) return;
+      var hasConflict = component.some(function (index) {
+        return neighbors[index].some(function (next) {
+          return bundles[index].chosenSide === bundles[next].chosenSide;
+        });
+      });
+      if (!hasConflict) return;
+      var orientation = null;
+      var costs = [0, 0];
+      component.forEach(function (index) {
+        var bundle = bundles[index];
+        var color = colors.get(index);
+        bundle.links.forEach(function (link) {
+          var forced = link._forceCircularLinkType;
+          if (forced === "top" || forced === "bottom") {
+            var required = color ^ (forced === "bottom" ? 1 : 0);
+            if (orientation !== null && orientation !== required) possible = false;
+            orientation = required;
+          }
+          // Load/crossing costs were measured during greedy assignment and
+          // depend on its ordering. Choose the component orientation using
+          // endpoint geometry, which remains valid for both complete choices.
+          var topGeometry = bundle.costComponents.top;
+          var bottomGeometry = bundle.costComponents.bottom;
+          var topCost = topGeometry.distance + 4 * topGeometry.direction;
+          var bottomCost = bottomGeometry.distance + 4 * bottomGeometry.direction;
+          costs[0] += (color === 0 ? topCost : bottomCost) * visibleWidth(link);
+          costs[1] += (color === 0 ? bottomCost : topCost) * visibleWidth(link);
+        });
+      });
+      if (!possible) return;
+      // When one source fans into different targets on opposite bands,
+      // match the upper target to the upper corridor. This avoids sending
+      // its neighbor's target leg across that upper target's entry arm.
+      var preferred = null;
+      var preferenceConflict = false;
+      component.forEach(function (index, i) {
+        component.slice(i + 1).forEach(function (otherIndex) {
+          if (colors.get(index) === colors.get(otherIndex)) return;
+          var a = bundles[index], b = bundles[otherIndex];
+          if (a.target.column === b.target.column) return;
+          var sharedSource = a.links.some(function (left) {
+            return b.links.some(function (right) { return left.source === right.source; });
+          });
+          if (!sharedSource || Math.abs(a.targetY - b.targetY) <= 1e-6) return;
+          var upperIndex = a.targetY < b.targetY ? index : otherIndex;
+          var required = colors.get(upperIndex);
+          if (preferred !== null && preferred !== required) preferenceConflict = true;
+          preferred = required;
+        });
+      });
+      if (orientation === null && preferred !== null && !preferenceConflict) orientation = preferred;
+      if (orientation === null) orientation = costs[0] <= costs[1] ? 0 : 1;
+      component.forEach(function (index) {
+        var bundle = bundles[index];
+        var side = (colors.get(index) ^ orientation) === 0 ? "top" : "bottom";
+        bundle.chosenSide = side;
+        bundle.links.forEach(function (link) {
+          link.circularLinkType = side;
+          link._circularRoutingCost.chosen = side;
+          trace(link, "cost/backlink-component/" + side);
+        });
+      });
+    });
+
+    // Different target nodes in one column have an endpoint order that column
+    // intervals cannot express. Keep an earlier, upper target outside the
+    // lower target's bottom bundle by routing its entire return group on top.
+    var targetGroups = new Map();
+    bundles.forEach(function(bundle) {
+      var group = targetGroups.get(bundle.target);
+      if (!group) {
+        group = { target: bundle.target, y: bundle.targetY,
+          min: Infinity, max: -Infinity, bundles: [] };
+        targetGroups.set(bundle.target, group);
+      }
+      group.min = Math.min(group.min, bundle.sourceColumn);
+      group.max = Math.max(group.max, bundle.sourceColumn);
+      group.bundles.push(bundle);
+    });
+    var orderedTargets = Array.from(targetGroups.values());
+    orderedTargets.forEach(function(upper) {
+      var mustUseTop = orderedTargets.some(function(lower) {
+        return upper.target.column === lower.target.column && upper.y < lower.y &&
+          upper.max < lower.min && lower.bundles.some(function(bundle) {
+            return bundle.chosenSide === "bottom";
+          });
+      });
+      var explicitlyBottom = upper.bundles.some(function(bundle) {
+        return bundle.links.some(function(link) {
+          return link._forceCircularLinkType === "bottom";
+        });
+      });
+      if (!mustUseTop || explicitlyBottom) return;
+      // Prefer flipping a whole bipartite component when its target groups
+      // have disjoint source ranges. Overlapping ranges need to retain their
+      // current corridor, or moving one target can cross another target group.
+      var component = [];
+      upper.bundles.forEach(function(bundle) {
+        var start = bundles.indexOf(bundle);
+        if (component.includes(start)) return;
+        component.push(start);
+      });
+      for (var q = 0; q < component.length; q++) {
+        neighbors[component[q]].forEach(function(next) {
+          if (!component.includes(next)) component.push(next);
+        });
+      }
+      var componentTargets = orderedTargets.filter(function(group) {
+        return group.target.column === upper.target.column && group.bundles.some(function(bundle) {
+          return component.includes(bundles.indexOf(bundle));
+        });
+      });
+      var overlappingTargets = componentTargets.some(function(a, i) {
+        return componentTargets.slice(i + 1).some(function(b) {
+          return Math.max(a.min, b.min) <= Math.min(a.max, b.max);
+        });
+      });
+      var canFlip = !overlappingTargets && component.every(function(index) {
+        return !bundles[index].links.some(function(link) {
+          return link._forceCircularLinkType === "top" || link._forceCircularLinkType === "bottom";
+        }) && neighbors[index].every(function(next) {
+          return bundles[index].chosenSide !== bundles[next].chosenSide;
+        });
+      });
+      if (canFlip && upper.bundles.every(function(bundle) { return bundle.chosenSide === "bottom"; })) {
+        component.forEach(function(index) {
+          var bundle = bundles[index];
+          bundle.chosenSide = bundle.chosenSide === "top" ? "bottom" : "top";
+          bundle.links.forEach(function(link) {
+            link.circularLinkType = bundle.chosenSide;
+            link._circularRoutingCost.chosen = bundle.chosenSide;
+            trace(link, "cost/target-order/component");
+          });
+        });
+        return;
+      }
+      upper.bundles.forEach(function(bundle) {
+        if (bundle.chosenSide === "top") return;
+        bundle.chosenSide = "top";
+        bundle.links.forEach(function(link) {
+          link.circularLinkType = "top";
+          link._targetOrderRerouted = true;
+          link._circularRoutingCost.chosen = "top";
+          trace(link, "cost/target-order/top");
+        });
+      });
     });
   })();
   
@@ -1325,13 +1528,11 @@ function createVirtualNodes(inputGraph, useVirtualRoutes, id) {
       }
     });
 
+    // Archive connected routes together so shared nodes are copied only once.
+    clone(graph.links.filter(link => link.linkType === "replaced").reverse()).forEach(link => graph.replacedLinks.push(link));
     let l = graph.links.length;
     while (l--) {
-      if (graph.links[l].linkType == "replaced") {
-        let obj = clone(graph.links[l]);
-        graph.links.splice(l, 1);
-        graph.replacedLinks.push(obj);
-      }
+      if (graph.links[l].linkType == "replaced") graph.links.splice(l, 1);
     }
 
     graph.nodes.forEach(function (node) {
@@ -2119,27 +2320,26 @@ function addVirtualPathData(inputGraph, virtualLinkType) {
         });
       replacedLink.path = normalPath(replacedLink);
     }
-
-    let copy = clone(replacedLink);
-    graph.links.push(copy);
   });
+  clone(graph.replacedLinks).forEach(link => graph.links.push(link));
+
+  // Virtual entities are a connected graph. Copy that graph once rather
+  // than recursively copying the entire graph again for every archived item.
+  const archive = clone({
+    links: graph.links.filter(link => link.linkType === "virtual").reverse(),
+    nodes: graph.nodes.filter(node => node.virtual).reverse(),
+  });
+  graph.virtualLinks = archive.links;
+  graph.virtualNodes = archive.nodes;
 
   let l = graph.links.length;
   while (l--) {
-    if (graph.links[l].linkType == "virtual") {
-      let obj = clone(graph.links[l]);
-      graph.links.splice(l, 1);
-      graph.virtualLinks.push(obj);
-    }
+    if (graph.links[l].linkType == "virtual") graph.links.splice(l, 1);
   }
 
   let n = graph.nodes.length;
   while (n--) {
-    if (graph.nodes[n].virtual) {
-      let obj = clone(graph.nodes[n]);
-      graph.nodes.splice(n, 1);
-      graph.virtualNodes.push(obj);
-    }
+    if (graph.nodes[n].virtual) graph.nodes.splice(n, 1);
   }
 
   return graph;
@@ -2174,6 +2374,9 @@ class SankeyChart {
         // This helps when capped gap spacing would otherwise leave large top/bottom margins.
         fillHeight: "none",
         horizontalSort: null,
+        adaptiveColumnSpacing: false,
+        adaptiveColumnSpacingStrength: 1,
+        circularSourceOrdering: false,
         verticalSort: null,
         // How much circular links influence vertical relaxation.
         // 0 = ignore circular links (default), 0.2..0.5 = let circular structure pull nodes slightly.
@@ -2336,6 +2539,13 @@ class SankeyChart {
       this.config.id
     );
 
+    this.graph.nodes.forEach(function(node) {
+      delete node._sourceCorridorReordered;
+      delete node._mirrorTopSource;
+      delete node._outerTopSource;
+      delete node._insetTopSource;
+    });
+
     this.graph.x0 = this.config.padding;
     this.graph.y0 = this.config.padding;
     this.graph.x1 = this.config.width - this.config.padding;
@@ -2373,7 +2583,10 @@ class SankeyChart {
       this.config.links.circularLinkPortionTopBottom,
       this.config.links.circularLinkPortionLeftRight,
       this.config.scale,
-      this.config.links.baseRadius
+      this.config.links.baseRadius,
+      { adaptive: this.config.nodes.adaptiveColumnSpacing,
+        strength: this.config.nodes.adaptiveColumnSpacingStrength,
+        gap: this.config.links.circularGap, radius: this.config.links.baseRadius }
     );
 
     // Optional: scale up ky so the diagram occupies more of the available height.
@@ -2498,7 +2711,10 @@ class SankeyChart {
       this.config.padding,
       this.config.height,
       this.config.width,
-      this.config.nodes.width
+      this.config.nodes.width,
+      { adaptive: this.config.nodes.adaptiveColumnSpacing,
+        strength: this.config.nodes.adaptiveColumnSpacingStrength,
+        gap: this.config.links.circularGap, radius: this.config.links.baseRadius }
     );
 
     // this.graph = computeNodeBreadths(
@@ -2605,7 +2821,10 @@ class SankeyChart {
       this.config.padding,
       this.config.height,
       this.config.width,
-      this.config.nodes.width
+      this.config.nodes.width,
+      { adaptive: this.config.nodes.adaptiveColumnSpacing,
+        strength: this.config.nodes.adaptiveColumnSpacingStrength,
+        gap: this.config.links.circularGap, radius: this.config.links.baseRadius }
     );
 
     // Final safety clamp:
@@ -2687,6 +2906,145 @@ class SankeyChart {
       });
     })(this);
 
+    // Opposite source corridors cannot cross at their departures. Order real
+    // source nodes with upward returns first, preserving each band's existing
+    // order and the column's occupied height. This opt-in overrides vertical
+    // priorities only in columns whose departures would otherwise interleave.
+    if (this.config.nodes.circularSourceOrdering) {
+      var self = this;
+      var sourceColumns = new Map();
+      this.graph.nodes.forEach(function(node) {
+        delete node._sourceCorridorReordered;
+        delete node._mirrorTopSource;
+        delete node._outerTopSource;
+        delete node._insetTopSource;
+        if (node.virtual) return;
+        if (!sourceColumns.has(node.column)) sourceColumns.set(node.column, []);
+        sourceColumns.get(node.column).push(node);
+      });
+      sourceColumns.forEach(function(nodes) {
+        nodes.sort(function(a,b) { return a.y0-b.y0; });
+        function hasTopReturn(node) {
+          return node.sourceLinks.some(function(link) {
+            return link.circular && !link.isVirtual && link.source.column>link.target.column &&
+              link.circularLinkType === "top";
+          });
+        }
+        if (nodes.some(function(node) { return !Number.isFinite(node.y0) || !Number.isFinite(node.y1); })) return;
+        var topNodes = nodes.filter(hasTopReturn);
+        if (topNodes.length > 1) {
+          var interleaved = topNodes.some(function(top) {
+            return nodes.some(function(bottom) {
+              return bottom !== top && bottom.y0 < top.y0 && bottom.sourceLinks.some(function(link) {
+                return link.circular && !link.isVirtual && link.source.column > link.target.column &&
+                  link.circularLinkType === "bottom";
+              });
+            });
+          });
+          if (interleaved) topNodes.forEach(function(node) {
+            var hasEarlierBottom = nodes.some(function(earlier) {
+              return earlier !== node && earlier.y0 < node.y0 && earlier.sourceLinks.some(function(link) {
+                return link.circular && !link.isVirtual && link.source.column > link.target.column &&
+                  link.circularLinkType === "bottom";
+              });
+            });
+            if (!hasEarlierBottom) node._outerTopSource = true;
+            else node._mirrorTopSource = true;
+          });
+          if (interleaved) {
+            // Keep a shared destination bundle aligned. Independent bundles
+            // may inset their source node while preserving the existing lane.
+            var sharesBottomBundle = nodes.some(function(node) {
+              if (!node._mirrorTopSource) return false;
+              var destinations = node.sourceLinks.filter(function(link) {
+                return link.circular && !link.isVirtual && link.source.column > link.target.column &&
+                  link.circularLinkType === "bottom";
+              }).map(function(link) { return link.target; });
+              return nodes.some(function(earlier) {
+                return earlier.y0 < node.y0 && earlier.sourceLinks.some(function(link) {
+                  return link.circular && !link.isVirtual && link.circularLinkType === "bottom" &&
+                    destinations.includes(link.target);
+                });
+              });
+            });
+            if (sharesBottomBundle) return;
+            var mirroredLinks = [];
+            nodes.forEach(function(node) {
+              if (!node._mirrorTopSource) return;
+              node.sourceLinks.forEach(function(link) {
+                if (link.circular && !link.isVirtual && link.source.column > link.target.column &&
+                    link.circularLinkType === "top") mirroredLinks.push(link);
+              });
+            });
+            mirroredLinks.sort(function(a,b) { return b.y0-a.y0; });
+            var radius = 0;
+            var insetRadii = new Map();
+            mirroredLinks.forEach(function(link,i) {
+              radius = i === 0 ? self.config.links.baseRadius+(link.width||0)/2 : radius+
+                ((mirroredLinks[i-1].width||0)+(link.width||0))/2+self.config.links.circularGap;
+              insetRadii.set(link.source,Math.max(insetRadii.get(link.source)||0,radius));
+            });
+            nodes.forEach(function(node) {
+              if (!node._mirrorTopSource) return;
+              var width = node.x1-node.x0;
+              var departure = mirroredLinks.find(function(link) { return link.source === node; });
+              var sourceBuffer = departure.circularPathData.rightNodeBuffer;
+              var mirrorBuffer = departure.circularPathData.leftNodeBuffer;
+              var right = node.x0-sourceBuffer-mirrorBuffer-2*insetRadii.get(node);
+              // A source inset must also clear return lanes from preceding
+              // columns, including their stroke beside the entire node body.
+              self.graph.links.forEach(function(link) {
+                var c = link.circularPathData;
+                if (!link.circular || link.isVirtual || link.source.column >= node.column ||
+                    link.source.column <= link.target.column || !c || link.circularLinkType !== "bottom" ||
+                    c.sourceY > node.y1 || c.verticalFullExtent < node.y0) return;
+                right = Math.max(right,c.rightFullExtent+(link.width||0)/2+width+self.config.links.circularGap);
+              });
+              var topWidth = Math.max.apply(null,mirroredLinks.filter(function(link) {
+                return link.source === node;
+              }).map(function(link) { return link.width||0; }));
+              var maxLegX = Infinity;
+              nodes.forEach(function(earlier) {
+                if (earlier.y0 >= node.y0) return;
+                earlier.sourceLinks.forEach(function(link) {
+                  if (!link.circular || link.isVirtual || link.source.column <= link.target.column) return;
+                  maxLegX = Math.min(maxLegX,earlier.x1-
+                    (topWidth+(link.width||0))/2-self.config.links.circularGap);
+                });
+              });
+              var requiredRoom = right+sourceBuffer+insetRadii.get(node)-maxLegX;
+              if (requiredRoom > 0) {
+                // Reserve only the missing corridor width; later columns move
+                // together so the inset does not cross another departure.
+                self.graph.nodes.forEach(function(later) {
+                  if (later.column < node.column) return;
+                  later.x0 += requiredRoom;
+                  later.x1 += requiredRoom;
+                });
+              }
+              node.x1 = right;
+              node.x0 = right-width;
+              node._insetTopSource = true;
+            });
+          }
+          return;
+        }
+        var ordered = nodes.slice().sort(function(a,b) {
+          return Number(hasTopReturn(b))-Number(hasTopReturn(a));
+        });
+        if (ordered.every(function(node,i) { return node===nodes[i]; })) return;
+        var gaps = nodes.slice(1).map(function(node,i) { return node.y0-nodes[i].y1; });
+        var y = nodes[0].y0;
+        ordered.forEach(function(node,i) {
+          var height = node.y1-node.y0;
+          node.y0 = y;
+          node.y1 = y+height;
+          node._sourceCorridorReordered = true;
+          y = node.y1+(gaps[i] || 0);
+        });
+      });
+    }
+
     // After clamping columns back into bounds, re-assign link ports using the SAME custom
     // circular-aware ordering. `computeLinkBreadths()` sorts circular ports in a single
     // bottom-stacked band and can re-introduce wrong entry ordering/braiding.
@@ -2712,7 +3070,9 @@ class SankeyChart {
       this.config.id,
       this.config.links.circularGap,
       this.config.links.baseRadius,
-      this.config.links.verticalMargin
+      this.config.links.verticalMargin,
+      true,
+      this.config.nodes.circularSourceOrdering
     );
 
 

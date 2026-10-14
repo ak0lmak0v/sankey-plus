@@ -101,3 +101,81 @@ let config = {
 | length   | Length of the arrow, in pixels        | 10        | No        |
 | gap   | Length of the gap between each arrow, in pixels        | 25        | No        |
 | headSize   | width of the arrow head, in pixels        | 4        | No        |
+### Adaptive column spacing
+
+Set `nodes.adaptiveColumnSpacing: true` to give more horizontal room to crowded
+backlink turns. The layout uses both the number and stroke widths of backlinks
+entering or leaving each gap, redistributing space within the configured chart
+width. Long horizontal shelves do not add demand to intermediate gaps. The
+option defaults to `false`; layouts without backlinks retain equal spacing.
+
+`nodes.adaptiveColumnSpacingStrength` controls how much backlink load changes
+column gaps (default `1`). A value between `0` and `1` balances busy and quiet
+gaps more evenly; `0` gives equal spacing. This option applies only when
+adaptive column spacing is enabled.
+
+```js
+new SankeyChart({
+  width: 2600,
+  nodes: { data: nodes, adaptiveColumnSpacing: true },
+  links: { data: links }
+});
+```
+
+
+`nodes.circularSourceOrdering` (default `false`) repairs conflicting circular
+source departures. With one upward-return source in a column, it places that
+node before downward-return sources and compacts their source turns. This can
+change the specified vertical node order. If several nodes return in both
+directions, their vertical order is preserved. Independent destination bundles
+can inset the lower source node horizontally, retaining its right-side exit
+with round local corners. The preceding return lanes and upper departures bound
+the inset; only missing corridor room is added before that column. Shared
+bottom destination bundles remain aligned and use the left source corridor
+where necessary. Upper sources keep their right-side exits and wrap outside
+inner returns at the shelf and target ports. Enable it to avoid opposite source
+corridors crossing while keeping return lanes compact.
+
+With this repair enabled, downward links within a column use the left corridor
+when their target sends upward returns. Extended upward departures use straight
+stubs with local round corners, keeping departure length independent of corner
+radius and shelf height.
+
+With `nodes.circularSourceOrdering` enabled, inter-column return departures use
+`baseRadius + link.width / 2` as the minimum local round radius. The vertical
+lane position is allocated separately for clearance. Contiguous parallel lanes
+use nested outer radii so their shelf bends share a center; departure bends
+also account for the source-port gap. Radius growth is bounded by the available
+horizontal and vertical straight segments. Any remaining horizontal offset
+uses a straight stub, so lane offsets alone do not inflate a corner radius.
+This also applies to mirrored return departures. Same-column loops retain their
+own geometry, and anchor adjacent enclosing source bends.
+
+After port reordering, upward return bundles release unoccupied target turn
+slots. Target radii and shelves compact together against final node bounds,
+foreign lanes and endpoint corners, retaining port order and stroke clearance.
+
+Mirrored upward returns release shelf space reserved by the former right-side
+turns. Their final shelf ceiling respects node bounds, endpoint corners and
+the existing order of neighboring corridors. Returns sharing a target move as
+one bundle, preserving the common center of their nested arrival bends.
+
+An independent outer target return can follow an enclosed round bundle across different
+columns. Its shelf uses separate horizontal and vertical radii to share the
+inner bend center without changing the arrival corner, allocated lanes or
+shelf positions. Radius growth requires clearance on both axes and enough
+room for the remaining straight segments; already elliptical inner corners
+are not used as nesting anchors. Shared-target bundles and already concentric
+adjacent corners in one target column retain their bend centers. Adapting a
+corner around another column must not resize just one member of that frame.
+Left-leg compaction checks the full span of a long enclosing return,
+so pulling it toward its own node cannot pass an intervening target lane and
+reverse the nesting order. Ellipse axes are limited to a 2:1 ratio. More stretched corners, or
+ones whose minimum curvature would pinch the inside of the stroke, fall back
+to round bends; column offsets remain straight shelf segments.
+
+When independent sources are horizontally inset, source lanes are repacked from
+their final node positions. A departure starts with the node buffer and local
+corner radius; additional offset is reserved only for neighboring lanes, local
+loops, or an enclosing rerouted return. Legacy column turn-slot offsets do not
+keep these departures artificially far from their nodes.

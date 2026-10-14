@@ -1,3 +1,4 @@
+import {positionColumns} from "./columnSpacing.js";
 import {min, max} from "d3-array";
 
 export function adjustGraphExtents(
@@ -5,7 +6,8 @@ export function adjustGraphExtents(
   chartPadding,
   svgHeight,
   svgWidth,
-  nodeWidth
+  nodeWidth,
+  columnSpacing
 ) {
   let chartHeight = svgHeight - chartPadding - chartPadding;
   let chartWidth = svgWidth - chartPadding - chartPadding;
@@ -114,16 +116,7 @@ export function adjustGraphExtents(
       graph.x1 = graph.x1 - x1move;
     }
 
-    let maxColumn = max(graph.nodes, function (node) {
-      return node.column;
-    });
-
-    graph.nodes.forEach(function (node) {
-      node.x0 =
-        graph.x0 +
-        node.column * ((graph.x1 - graph.x0 - nodeWidth) / maxColumn);
-      node.x1 = node.x0 + nodeWidth;
-    });
+    positionColumns(graph, nodeWidth, columnSpacing);
   }
 
   return graph;

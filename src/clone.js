@@ -54,20 +54,20 @@
         includeNonEnumerable = circular.includeNonEnumerable;
         circular = circular.circular;
       }
-      // maintain two arrays for circular references, where corresponding parents
-      // and children have the same index
-      var allParents = [];
-      var allChildren = [];
+      // Remember copied objects by identity; graph references must not trigger
+      // a linear scan or another discarded copy on every repeated visit.
+      var seen;
     
       var useBuffer = typeof Buffer != 'undefined';
     
       if (typeof circular == 'undefined')
         circular = true;
+      if (circular) seen = new WeakMap();
     
       if (typeof depth == 'undefined')
         depth = Infinity;
     
-      // recurse this function so we don't reset allParents and allChildren
+      // Keep one identity cache for the whole recursive copy.
       function _clone(parent, depth) {
         // cloning null always returns null
         if (parent === null)
@@ -82,6 +82,8 @@
           return parent;
         }
     
+        if (circular && seen.has(parent)) return seen.get(parent);
+
         if (_instanceof(parent, nativeMap)) {
           child = new nativeMap();
         } else if (_instanceof(parent, nativeSet)) {
@@ -124,15 +126,7 @@
           }
         }
     
-        if (circular) {
-          var index = allParents.indexOf(parent);
-    
-          if (index != -1) {
-            return allChildren[index];
-          }
-          allParents.push(parent);
-          allChildren.push(child);
-        }
+        if (circular) seen.set(parent, child);
     
         if (_instanceof(parent, nativeMap)) {
           parent.forEach(function(value, key) {

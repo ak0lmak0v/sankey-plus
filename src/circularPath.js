@@ -15,7 +15,9 @@ export function addCircularPathData(
   id,
   circularLinkGap,
   baseRadius,
-  verticalMargin
+  verticalMargin,
+  compactFinalBacklinks = false,
+  compactSourceTurns = false
 ) {
   let graph = inputGraph;
 
@@ -5390,6 +5392,23 @@ export function addCircularPathData(
             outer.target === inner.target
           ) {
             var idealOuterLfe = ic.leftFullExtent - innerVisHW - gap - outerVisHW;
+            if (compactFinalBacklinks && compactSourceTurns) {
+              // The short inner leg can skip intervening target bundles in Y.
+              // Pulling its long enclosing return past those bundles reverses
+              // their lanes and makes the later gap resolver push them outside.
+              var outerYMin=Math.min(oc.targetY,oc.verticalLeftInnerExtent);
+              var outerYMax=Math.max(oc.targetY,oc.verticalLeftInnerExtent);
+              group.forEach(function(blocker) {
+                if (blocker===outer || blocker===inner) return;
+                var bc=blocker.circularPathData;
+                if (bc.leftFullExtent<=oc.leftFullExtent+1e-6) return;
+                var blockerYMin=Math.min(bc.targetY,bc.verticalLeftInnerExtent);
+                var blockerYMax=Math.max(bc.targetY,bc.verticalLeftInnerExtent);
+                if (Math.min(outerYMax,blockerYMax)<=Math.max(outerYMin,blockerYMin)+1e-6) return;
+                idealOuterLfe=Math.min(idealOuterLfe,bc.leftFullExtent-
+                  Math.max(blocker.width || 0,1)/2-gap-outerVisHW);
+              });
+            }
             if (idealOuterLfe > oc.leftFullExtent + 1e-6) {
               var pull = idealOuterLfe - oc.leftFullExtent;
               var minRadius = baseRadius + (outer.width || 0) / 2;
@@ -5770,6 +5789,944 @@ export function addCircularPathData(
     });
 
   })();
+
+  // Backlinks from one source may return to different target columns, yet
+  // their left legs can occupy the same corridor. Column-local packing does
+  // not see that collision. Keep the farther target outside the nearer one.
+  var finalSourceBundles = new Map();
+  graph.links.forEach(function(link) {
+    if (!link.circular || link.isVirtual || !link.circularPathData ||
+        link.target.column >= link.source.column) return;
+    var key = link.source.index + "|" + link.circularLinkType;
+    if (!finalSourceBundles.has(key)) finalSourceBundles.set(key, []);
+    finalSourceBundles.get(key).push(link);
+  });
+  finalSourceBundles.forEach(function(group) {
+    group.sort(function(a, b) { return b.target.column - a.target.column; });
+    for (var i = 1; i < group.length; i++) {
+      var outer = group[i];
+      var c = outer.circularPathData;
+      for (var j = 0; j < i; j++) {
+        var inner = group[j];
+        if (outer.target.column === inner.target.column) continue;
+        var ic = inner.circularPathData;
+        var outerMin = Math.min(c.targetY, c.verticalFullExtent);
+        var outerMax = Math.max(c.targetY, c.verticalFullExtent);
+        var innerMin = Math.min(ic.targetY, ic.verticalFullExtent);
+        var innerMax = Math.max(ic.targetY, ic.verticalFullExtent);
+        if (Math.min(outerMax, innerMax) <= Math.max(outerMin, innerMin)) continue;
+        var clearance = Math.max(outer.width || 0, 1) / 2 +
+          Math.max(inner.width || 0, 1) / 2 + (circularLinkGap || 0);
+        var maxLfe = ic.leftFullExtent - clearance;
+        if (c.leftFullExtent <= maxLfe) continue;
+        var delta = c.leftFullExtent - maxLfe;
+        c.leftLargeArcRadius += delta;
+        c.leftSmallArcRadius += delta;
+        c.leftFullExtent = maxLfe;
+        var bottom = outer.circularLinkType === "bottom";
+        var turnBound = c.targetY + (bottom ? 1 : -1) *
+          (c.leftLargeArcRadius + c.leftSmallArcRadius + (circularLinkGap || 0));
+        var nextVfe = bottom ? Math.max(c.verticalFullExtent, turnBound) : Math.min(c.verticalFullExtent, turnBound);
+        var vfeDelta = nextVfe - c.verticalFullExtent;
+        c.verticalFullExtent = nextVfe;
+        if (typeof c.verticalBuffer === "number") c.verticalBuffer += bottom ? vfeDelta : -vfeDelta;
+        c.verticalLeftInnerExtent = nextVfe + (bottom ? -c.leftLargeArcRadius : c.leftLargeArcRadius);
+        c.verticalRightInnerExtent = nextVfe + (bottom ? -c.rightLargeArcRadius : c.rightLargeArcRadius);
+      }
+    }
+  });
+
+  // Left-leg packing can enlarge target turns after shelf placement. Keep
+  // the outer shelf outside the inner turn as well as outside its stroke.
+  function preserveTargetTurnNesting() {
+    var groups = new Map();
+    graph.links.forEach(function(link) {
+      if (!link.circular || link.isVirtual || selfLinking(link, id) ||
+          !link.circularPathData || !link.target) return;
+      var key = link.target.column + "|" + link.circularLinkType;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(link);
+    });
+    groups.forEach(function(group) {
+      if (group.length < 2) return;
+      group.sort(function(a, b) {
+        return b.circularPathData.leftFullExtent - a.circularPathData.leftFullExtent;
+      });
+      for (var i = 1; i < group.length; i++) {
+        var outer = group[i];
+        var c = outer.circularPathData;
+        var bottom = outer.circularLinkType === "bottom";
+        var nextVfe = c.verticalFullExtent;
+        for (var j = 0; j < i; j++) {
+          var inner = group[j];
+          var ic = inner.circularPathData;
+          // Unrelated target turns that do not overlap vertically need no nesting.
+          var outerMin = Math.min(c.targetY, c.verticalFullExtent);
+          var outerMax = Math.max(c.targetY, c.verticalFullExtent);
+          var innerMin = Math.min(ic.targetY, ic.verticalFullExtent);
+          var innerMax = Math.max(ic.targetY, ic.verticalFullExtent);
+          if (Math.min(outerMax, innerMax) <= Math.max(outerMin, innerMin)) continue;
+          var clearance = Math.max(outer.width || 0, 1) / 2 +
+            Math.max(inner.width || 0, 1) / 2 + (circularLinkGap || 0);
+          var turnOffset = Math.max(clearance,
+            c.leftLargeArcRadius - ic.leftLargeArcRadius);
+          var bound = ic.verticalFullExtent + (bottom ? turnOffset : -turnOffset);
+          nextVfe = bottom ? Math.max(nextVfe, bound) : Math.min(nextVfe, bound);
+        }
+        var delta = nextVfe - c.verticalFullExtent;
+        if (Math.abs(delta) <= 1e-6) continue;
+        c.verticalFullExtent = nextVfe;
+        if (typeof c.verticalBuffer === "number") c.verticalBuffer += bottom ? delta : -delta;
+        c.verticalLeftInnerExtent = nextVfe + (bottom ? -c.leftLargeArcRadius : c.leftLargeArcRadius);
+        c.verticalRightInnerExtent = nextVfe + (bottom ? -c.rightLargeArcRadius : c.rightLargeArcRadius);
+      }
+    });
+  }
+  preserveTargetTurnNesting();
+
+  // Target-side height adjustments must also preserve source-side nesting.
+  // A farther right leg wraps outside a nearer right leg at the lower/upper
+  // shelf corner; moving only the shelf can make those corners cross.
+  function preserveSourceTurnNesting() {
+  finalSourceBundles.forEach(function(group) {
+    group.sort(function(a, b) {
+      return a.circularPathData.rightFullExtent - b.circularPathData.rightFullExtent;
+    });
+    for (var i = 1; i < group.length; i++) {
+      var outer = group[i];
+      var c = outer.circularPathData;
+      var bottom = outer.circularLinkType === "bottom";
+      var nextVfe = c.verticalFullExtent;
+      for (var j = 0; j < i; j++) {
+        var inner = group[j];
+        if (outer.target.column === inner.target.column) continue;
+        var ic = inner.circularPathData;
+        var clearance = Math.max(outer.width || 0, 1) / 2 +
+          Math.max(inner.width || 0, 1) / 2 + (circularLinkGap || 0);
+        var turnOffset = Math.max(clearance,
+          c.rightLargeArcRadius - ic.rightLargeArcRadius);
+        var bound = ic.verticalFullExtent + (bottom ? turnOffset : -turnOffset);
+        nextVfe = bottom ? Math.max(nextVfe, bound) : Math.min(nextVfe, bound);
+      }
+      var delta = nextVfe - c.verticalFullExtent;
+      if (Math.abs(delta) <= 1e-6) continue;
+      c.verticalFullExtent = nextVfe;
+      if (typeof c.verticalBuffer === "number") c.verticalBuffer += bottom ? delta : -delta;
+      c.verticalLeftInnerExtent = nextVfe + (bottom ? -c.leftLargeArcRadius : c.leftLargeArcRadius);
+      c.verticalRightInnerExtent = nextVfe + (bottom ? -c.rightLargeArcRadius : c.rightLargeArcRadius);
+    }
+  });
+
+  }
+  preserveSourceTurnNesting();
+
+  // Source legs share a corridor by column, not by source node. Pack all
+  // final backlink turns in that corridor with stroke clearance and order
+  // their slots by actual source ports (lower ports are inner at the bottom).
+  var finalSourceColumns = new Map();
+  graph.links.forEach(function (link) {
+    if (!link.circular || link.isVirtual || !link.circularPathData ||
+        link.target.column >= link.source.column) return;
+    var key = link.source.column + "|" + link.circularLinkType;
+    if (!finalSourceColumns.has(key)) finalSourceColumns.set(key, []);
+    finalSourceColumns.get(key).push(link);
+  });
+  Array.from(finalSourceColumns.values()).sort(function(a,b) {
+    return Number(a[0].circularLinkType === "bottom") - Number(b[0].circularLinkType === "bottom");
+  }).forEach(function (group) {
+    var compactSource = group.some(function(link) { return link.source._sourceCorridorReordered; });
+    if (new Set(group.map(function (link) { return link.source; })).size < 2 && !compactSource) return;
+    var bottom = group[0].circularLinkType === "bottom";
+    var slots = group.map(function (link) {
+      return { large: link.circularPathData.rightLargeArcRadius,
+               small: link.circularPathData.rightSmallArcRadius };
+    }).sort(function (a, b) { return a.large - b.large; });
+    group.sort(function (a, b) {
+      return bottom ? b.circularPathData.sourceY - a.circularPathData.sourceY :
+        a.circularPathData.sourceY - b.circularPathData.sourceY;
+    });
+    group.forEach(function (link, i) {
+      var c = link.circularPathData;
+      var radius = Math.max(compactSource && (i>0 || !bottom) ? 0 : slots[i].large,
+        baseRadius + Math.max(link.width || 0, 1) / 2);
+      if (compactSource && bottom && i === 0) {
+        var upper = finalSourceColumns.get(link.source.column + "|top") || [];
+        upper.forEach(function(topLink) {
+          radius = Math.max(radius, topLink.circularPathData.rightFullExtent - c.rightInnerExtent +
+            ((topLink.width || 0) + (link.width || 0)) / 2 + (circularLinkGap || 0));
+        });
+      }
+      if (i > 0) {
+        var prev = group[i - 1];
+        radius = Math.max(radius, prev.circularPathData.rightLargeArcRadius +
+          Math.max(prev.width || 0, 1) / 2 + Math.max(link.width || 0, 1) / 2 + (circularLinkGap || 0));
+      }
+      c.rightLargeArcRadius = radius;
+      c.rightSmallArcRadius = Math.max(compactSource && !bottom ? 0 : slots[i].small,
+        baseRadius + Math.max(link.width || 0, 1) / 2);
+      c.rightFullExtent = c.rightInnerExtent + radius;
+      c.verticalRightInnerExtent = c.verticalFullExtent + (bottom ? -radius : radius);
+    });
+  });
+
+  // Final band assignment and port sorting can reverse incoming routes to
+  // the same node. Reorder their target turn slots to match actual port Y:
+  // bottom turns wrap from lower ports outward to upper ports (top mirrors).
+  (function alignTargetTurnsWithPorts() {
+    var groups = new Map();
+    graph.links.forEach(function (link) {
+      if (!link.circular || link.isVirtual || !link.circularPathData || selfLinking(link, id)) return;
+      var key = link.target.index + "|" + link.circularLinkType;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(link);
+    });
+    groups.forEach(function (group) {
+      if (group.length < 2) return;
+      var bottom = group[0].circularLinkType === "bottom";
+      var ordered = group.slice().sort(function (a, b) {
+        return bottom ? b.circularPathData.targetY - a.circularPathData.targetY :
+          a.circularPathData.targetY - b.circularPathData.targetY;
+      });
+      var misplaced = ordered.some(function (link, i) {
+        return i > 0 && link.circularPathData.leftFullExtent >
+          ordered[i - 1].circularPathData.leftFullExtent + 1e-6;
+      });
+      if (!misplaced) return;
+      var slots = group.map(function (link) {
+        return { large: link.circularPathData.leftLargeArcRadius,
+                 small: link.circularPathData.leftSmallArcRadius };
+      }).sort(function (a, b) { return a.large - b.large; });
+      ordered.forEach(function (link, i) {
+        var c = link.circularPathData;
+        var radius = Math.max(slots[i].large, baseRadius + Math.max(link.width || 0, 1) / 2);
+        if (i > 0) {
+          var prev = ordered[i - 1];
+          radius = Math.max(radius, prev.circularPathData.leftLargeArcRadius +
+            Math.max(prev.width || 0, 1) / 2 + Math.max(link.width || 0, 1) / 2 + (circularLinkGap || 0));
+        }
+        c.leftLargeArcRadius = radius;
+        c.leftSmallArcRadius = Math.max(slots[i].small, baseRadius + Math.max(link.width || 0, 1) / 2);
+        c.leftFullExtent = c.leftInnerExtent - radius;
+        c.verticalLeftInnerExtent = c.verticalFullExtent + (bottom ? -radius : radius);
+      });
+    });
+  })();
+
+  // Leave clearance around an enclosing route's target port. A shorter
+  // route's target leg can extend into that port even though the targets
+  // are in different columns. Compact its entire incoming bundle together
+  // so its own left-leg gaps and nesting remain unchanged.
+  (function clearEnclosingTargetPorts() {
+    var bundles = new Map();
+    graph.links.forEach(function(link) {
+      if (!link.circular || link.isVirtual || !link.circularPathData ||
+          selfLinking(link, id)) return;
+      var key = link.target.index + "|" + link.circularLinkType;
+      if (!bundles.has(key)) bundles.set(key, []);
+      bundles.get(key).push(link);
+    });
+    bundles.forEach(function(group) {
+      var shift = 0;
+      var available = Infinity;
+      group.forEach(function(inner) {
+        var c = inner.circularPathData;
+        available = Math.min(available,
+          c.leftLargeArcRadius - baseRadius - Math.max(inner.width || 0, 1) / 2,
+          c.leftSmallArcRadius);
+        graph.links.forEach(function(outer) {
+          if (!outer.circular || !outer.circularPathData || outer.isVirtual ||
+              outer.target.column >= inner.target.column ||
+              outer.source.column <= inner.source.column) return;
+          var oc = outer.circularPathData;
+          var clearance = Math.max(outer.width || 0, 1) / 2 +
+            Math.max(inner.width || 0, 1) / 2 + (circularLinkGap || 0);
+          var yMin = Math.min(c.targetY, c.verticalLeftInnerExtent);
+          var yMax = Math.max(c.targetY, c.verticalLeftInnerExtent);
+          if (oc.targetY < yMin - clearance || oc.targetY > yMax + clearance) return;
+          var requiredX = oc.targetX + clearance;
+          if (c.leftFullExtent < requiredX) {
+            shift = Math.max(shift, requiredX - c.leftFullExtent);
+          }
+        });
+      });
+      if (shift <= 1e-6 || shift > available + 1e-6) return;
+      group.forEach(function(link) {
+        var c = link.circularPathData;
+        c.leftFullExtent += shift;
+        c.leftLargeArcRadius -= shift;
+        c.leftSmallArcRadius -= shift;
+        c.verticalLeftInnerExtent = c.verticalFullExtent +
+          (link.circularLinkType === "bottom" ? -c.leftLargeArcRadius : c.leftLargeArcRadius);
+      });
+    });
+  })();
+
+  // A long backlink enclosing another backlink must wrap around its shelf,
+  // even when neither endpoint shares a column with the shorter route.
+  function preserveEnclosingShelves() {
+    var links = graph.links.filter(function(link) {
+      return link.circular && !link.isVirtual && link.circularPathData &&
+        link.target.column < link.source.column;
+    }).sort(function(a, b) {
+      return (a.source.column - a.target.column) - (b.source.column - b.target.column);
+    });
+    links.forEach(function(outer, i) {
+      var c = outer.circularPathData;
+      var bottom = outer.circularLinkType === "bottom";
+      var nextVfe = c.verticalFullExtent;
+      for (var j = 0; j < i; j++) {
+        var inner = links[j];
+        if (inner.circularLinkType !== outer.circularLinkType ||
+            inner.source.column >= outer.source.column ||
+            inner.target.column <= outer.target.column) continue;
+        var clearance = Math.max(outer.width || 0, 1) / 2 +
+          Math.max(inner.width || 0, 1) / 2 + (circularLinkGap || 0);
+        var bound = inner.circularPathData.verticalFullExtent +
+          (bottom ? clearance : -clearance);
+        nextVfe = bottom ? Math.max(nextVfe, bound) : Math.min(nextVfe, bound);
+      }
+      var delta = nextVfe - c.verticalFullExtent;
+      if (Math.abs(delta) <= 1e-6) return;
+      c.verticalFullExtent = nextVfe;
+      if (typeof c.verticalBuffer === "number") c.verticalBuffer += bottom ? delta : -delta;
+      c.verticalLeftInnerExtent = nextVfe + (bottom ? -c.leftLargeArcRadius : c.leftLargeArcRadius);
+      c.verticalRightInnerExtent = nextVfe + (bottom ? -c.rightLargeArcRadius : c.rightLargeArcRadius);
+    });
+  }
+
+  // Propagate outward moves across endpoint bundles and enclosed shelves.
+  // A target/source adjustment can deepen an inner route after its enclosing
+  // route was placed, so stop only once the final extents no longer change.
+  for (var nestingPass = 0; nestingPass < graph.links.length; nestingPass++) {
+    var oldExtents = graph.links.map(function(link) {
+      return link.circularPathData && link.circularPathData.verticalFullExtent;
+    });
+    preserveEnclosingShelves();
+    preserveTargetTurnNesting();
+    preserveSourceTurnNesting();
+    var nestingChanged = graph.links.some(function(link, i) {
+      return link.circularPathData &&
+        Math.abs(link.circularPathData.verticalFullExtent - oldExtents[i]) > 1e-6;
+    });
+    if (!nestingChanged) break;
+  }
+
+  // Compact all bottom corridors against final geometry, from inner to outer.
+  // Local loops can move inward after nesting; backlinks must release the
+  // space those loops previously reserved as well.
+  graph.links.filter(function(link) {
+    return link.circular && !link.isVirtual && !selfLinking(link, id) &&
+      link.circularLinkType === "bottom" &&
+      (compactFinalBacklinks || link.source.column === link.target.column);
+  }).sort(function(a, b) {
+    return a.circularPathData.verticalFullExtent - b.circularPathData.verticalFullExtent;
+  }).forEach(function(link) {
+    var c = link.circularPathData;
+    var gap = circularLinkGap || 0;
+    var halfWidth = (link.width || 0) / 2;
+    var oldVfe = c.verticalFullExtent;
+    var floor = Math.max(
+      c.sourceY + c.rightSmallArcRadius + c.rightLargeArcRadius + gap,
+      c.targetY + c.leftSmallArcRadius + c.leftLargeArcRadius + gap
+    );
+    var shelf = _shelfX(link);
+    graph.nodes.forEach(function(node) {
+      if (node.virtual || node === link.source || node === link.target) return;
+      if (node.x1 <= shelf.x0 || node.x0 >= shelf.x1) return;
+      floor = Math.max(floor, node.y1 + halfWidth + gap);
+    });
+    graph.links.forEach(function(inner) {
+      if (inner === link || !inner.circular || inner.isVirtual ||
+          inner.circularLinkType !== "bottom" || !inner.circularPathData ||
+          !_shelvesOverlapX(inner, link)) return;
+      var ic = inner.circularPathData;
+      // Preserve corridor order; outer shelves no longer reserve space here.
+      if (ic.verticalFullExtent >= oldVfe - 1e-6) return;
+      var clearance = ((inner.width || 0) + (link.width || 0)) / 2 + gap;
+      if (!selfLinking(inner, id) && inner.target.column === link.target.column &&
+          c.leftFullExtent < ic.leftFullExtent) {
+        clearance = Math.max(clearance, c.leftLargeArcRadius - ic.leftLargeArcRadius);
+      }
+      if (!selfLinking(inner, id) && inner.source.column === link.source.column &&
+          c.rightFullExtent > ic.rightFullExtent &&
+          Math.abs(c.rightInnerExtent - ic.rightInnerExtent) > 1e-6) {
+        // With a shared corner X, the larger arc can wrap the smaller arc
+        // while both shelves keep only stroke clearance. Aligning their
+        // circle centers in Y wastes the radius difference as shelf padding.
+        // Retain that conservative bound for horizontally offset corners.
+        clearance = Math.max(clearance, c.rightLargeArcRadius - ic.rightLargeArcRadius);
+      }
+      floor = Math.max(floor, ic.verticalFullExtent + clearance);
+    });
+    if (floor >= oldVfe - 1e-6) return;
+    c.verticalFullExtent = floor;
+    c.verticalBuffer += floor - oldVfe;
+    c.verticalLeftInnerExtent = floor - c.leftLargeArcRadius;
+    c.verticalRightInnerExtent = floor - c.rightLargeArcRadius;
+  });
+
+  // A target-order correction can put a short inner return into a source
+  // corridor already used by an enclosing return. Extend the enclosing source
+  // ellipse around it, independently of the compact shelf corner radius.
+  if (compactFinalBacklinks) {
+    graph.links.forEach(function(inner) {
+      if (!inner._targetOrderRerouted || !inner.circularPathData) return;
+      var ic = inner.circularPathData;
+      var tidySource = graph.nodes.some(function(node) {
+        return node._sourceCorridorReordered || node._mirrorTopSource;
+      });
+      graph.links.forEach(function(outer) {
+        if (!outer.circular || outer.isVirtual || !outer.circularPathData ||
+            outer.circularLinkType !== inner.circularLinkType ||
+            outer.target.column >= inner.target.column ||
+            outer.source.column >= inner.source.column ||
+            outer.source.column <= inner.target.column) return;
+        var c = outer.circularPathData;
+        var gap = ((outer.width || 0) + (inner.width || 0)) / 2 + (circularLinkGap || 0);
+        var right = ic.rightFullExtent + gap;
+        if (c.rightFullExtent >= right) return;
+        if (tidySource && outer.circularLinkType === "top") {
+          // A long departure is a straight source stub, not an oversized arc.
+          // Local round corners need no extra shelf height to wrap the inner
+          // return, and preserve the target's inner-to-outer shelf order.
+          var radius = baseRadius+(outer.width || 0)/2;
+          c.rightFullExtent = right;
+          c.rightLargeArcRadius = radius;
+          c.rightSmallArcRadius = radius;
+          c.rightSourceLargeArcRadius = radius;
+          c.rightDepartureInnerExtent = right-radius;
+          c.rightShelfInnerExtent = right-radius;
+          var nextVfe = ic.verticalFullExtent-gap;
+          c.verticalBuffer += c.verticalFullExtent-nextVfe;
+          c.verticalFullExtent = nextVfe;
+          c.verticalRightInnerExtent = nextVfe+radius;
+          c.verticalLeftInnerExtent = nextVfe+c.leftLargeArcRadius;
+          return;
+        }
+        c.rightFullExtent = right;
+        c.rightSourceLargeArcRadius = right - c.rightInnerExtent;
+        c.rightShelfInnerExtent = right - c.rightLargeArcRadius;
+        var bottom = outer.circularLinkType === "bottom";
+        // Travel beyond the inner source before rising into its corridor.
+        // The departure ellipse and the shelf corner need different heights.
+        var departureRoom = bottom ? ic.sourceY - c.sourceY - gap : c.sourceY - ic.sourceY - gap;
+        if (departureRoom > baseRadius + (outer.width || 0) / 2) {
+          c.rightSmallArcRadius = Math.min(c.rightSmallArcRadius, departureRoom);
+        }
+        var cornerClearance = Math.max(gap, c.rightLargeArcRadius - ic.rightLargeArcRadius);
+        var bound = ic.verticalFullExtent + (bottom ? cornerClearance : -cornerClearance);
+        var departureBound = c.sourceY + (bottom ? 1 : -1) *
+          (c.rightSmallArcRadius + c.rightLargeArcRadius + (circularLinkGap || 0));
+        bound = bottom ? Math.max(bound, departureBound) : Math.min(bound, departureBound);
+        var oldVfe = c.verticalFullExtent;
+        c.verticalFullExtent = bottom ? Math.max(oldVfe, bound) : Math.min(oldVfe, bound);
+        c.verticalBuffer += bottom ? c.verticalFullExtent - oldVfe : oldVfe - c.verticalFullExtent;
+        c.verticalRightInnerExtent = c.verticalFullExtent + (bottom ? -c.rightLargeArcRadius : c.rightLargeArcRadius);
+        c.verticalLeftInnerExtent = c.verticalFullExtent + (bottom ? -c.leftLargeArcRadius : c.leftLargeArcRadius);
+      });
+    });
+  }
+
+  // Mixed sources can have upward and downward returns from several nodes.
+  // Their departure order cannot be separated by moving nodes. Route the top
+  // conflicting departures on the preceding side of the source column instead.
+  // Upper sources retain their conventional right-side departures.
+  if (compactFinalBacklinks) {
+    var mirroredColumns = false;
+    finalSourceColumns.forEach(function(group) {
+      if (group[0].circularLinkType !== "top" ||
+          !group.some(function(link) { return link.source._mirrorTopSource; })) return;
+      mirroredColumns = true;
+      var rightSources = group.filter(function(link) { return link.source._outerTopSource; });
+      group = group.filter(function(link) { return link.source._mirrorTopSource; });
+      group.sort(function(a,b) { return b.circularPathData.sourceY-a.circularPathData.sourceY; });
+      var radius = 0;
+      group.forEach(function(link,i) {
+        var c = link.circularPathData;
+        radius = i === 0 ? baseRadius+(link.width||0)/2 : radius+
+          ((group[i-1].width||0)+(link.width||0))/2+(circularLinkGap||0);
+        if (!link.source._insetTopSource) c.mirroredSourceRadius = radius;
+        else {
+          c.rightLargeArcRadius = c.rightSmallArcRadius = radius;
+          c.rightFullExtent = c.rightInnerExtent+radius;
+        }
+        c.verticalFullExtent = Math.min(c.verticalFullExtent,c.sourceY-2*radius-(circularLinkGap||0));
+        if (link.source._insetTopSource) c.verticalRightInnerExtent = c.verticalFullExtent+radius;
+        c.verticalLeftInnerExtent = c.verticalFullExtent+c.leftLargeArcRadius;
+      });
+      // Lower source ports wrap outside upper ports in the upper corridor.
+      for(var i=group.length-2;i>=0;i--) {
+        var outer=group[i],inner=group[i+1];
+        var c=outer.circularPathData,ic=inner.circularPathData;
+        c.verticalFullExtent=Math.min(c.verticalFullExtent,ic.verticalFullExtent-
+          ((outer.width||0)+(inner.width||0))/2-(circularLinkGap||0));
+        c.verticalLeftInnerExtent=c.verticalFullExtent+c.leftLargeArcRadius;
+        if (outer.source._insetTopSource) c.verticalRightInnerExtent=c.verticalFullExtent+c.rightLargeArcRadius;
+      }
+      rightSources.forEach(function(outer) {
+        var c = outer.circularPathData;
+        group.forEach(function(inner) {
+          c.verticalFullExtent = Math.min(c.verticalFullExtent,inner.circularPathData.verticalFullExtent-
+            ((outer.width||0)+(inner.width||0))/2-(circularLinkGap||0));
+        });
+        c.verticalLeftInnerExtent = c.verticalFullExtent+c.leftLargeArcRadius;
+        c.verticalRightInnerExtent = c.verticalFullExtent+c.rightLargeArcRadius;
+      });
+    });
+    if (mirroredColumns) {
+      // The right departure encloses the mirrored source corridor. Its changed
+      // target-port order needs round, nested arrivals rather than the stale
+      // flattened ellipses calculated before the final port reconciliation.
+      var splitTargets = new Set();
+      graph.links.forEach(function(link) {
+        if (link.circular && link.circularLinkType === "top" && link.source._outerTopSource)
+          splitTargets.add(link.target);
+      });
+      graph.links.forEach(function(link) {
+        if (!link.circular || link.isVirtual || link.circularLinkType !== "top" ||
+            !splitTargets.has(link.target) || !link.circularPathData) return;
+        var c = link.circularPathData;
+        c.leftSmallArcRadius = c.leftLargeArcRadius;
+        c.verticalFullExtent = Math.min(c.verticalFullExtent,
+          c.targetY-2*c.leftLargeArcRadius-(circularLinkGap||0));
+        c.verticalLeftInnerExtent = c.verticalFullExtent+c.leftLargeArcRadius;
+        c.verticalRightInnerExtent = c.verticalFullExtent+c.rightLargeArcRadius;
+      });
+      preserveTargetTurnNesting();
+      // Reconciliation can lift the surrounding returns without lifting the
+      // shortest inner return. Release its old shelf floor after the final
+      // round target turns are known, preserving stroke and corner clearance.
+      splitTargets.forEach(function(target) {
+        var group = graph.links.filter(function(link) {
+          return link.circular && !link.isVirtual && !selfLinking(link,id) &&
+            link.circularLinkType === "top" && link.target === target &&
+            link.source.column > link.target.column && link.circularPathData;
+        }).sort(function(a,b) {
+          return a.circularPathData.leftFullExtent-b.circularPathData.leftFullExtent;
+        });
+        if (group.length < 2) return;
+        var inner = group[group.length-1], c = inner.circularPathData;
+        var enclosing = group.slice(0,-1);
+        if (enclosing.some(function(outer) {
+          return outer.source.column <= inner.source.column ||
+            Math.abs(outer.circularPathData.leftInnerExtent-c.leftInnerExtent)>1e-6;
+        })) return;
+        var floor = -Infinity;
+        enclosing.forEach(function(outer) {
+          var oc = outer.circularPathData;
+          var clearance = ((inner.width||0)+(outer.width||0))/2+(circularLinkGap||0);
+          floor = Math.max(floor,oc.verticalFullExtent+
+            Math.max(clearance,oc.leftLargeArcRadius-c.leftLargeArcRadius));
+        });
+        var turnLimit = Math.min(c.sourceY-c.rightSmallArcRadius-c.rightLargeArcRadius-(circularLinkGap||0),
+          c.targetY-c.leftSmallArcRadius-c.leftLargeArcRadius-(circularLinkGap||0));
+        if (floor >= c.verticalFullExtent || floor > turnLimit) return;
+        c.verticalBuffer += c.verticalFullExtent-floor;
+        c.verticalFullExtent = floor;
+        c.verticalLeftInnerExtent = floor+c.leftLargeArcRadius;
+        c.verticalRightInnerExtent = floor+c.rightLargeArcRadius;
+      });
+    }
+  }
+
+  // A downward connection within one column need not encircle its target.
+  // When that target sends returns upward, use the adjacent left corridor so
+  // its incoming loop cannot trap or cross those outgoing source turns.
+  if (compactFinalBacklinks && graph.nodes.some(function(node) {
+    return node._sourceCorridorReordered || node._mirrorTopSource;
+  })) {
+    graph.links.forEach(function(link) {
+      if (!link.circular || link.isVirtual || selfLinking(link,id) ||
+          link.source.column !== link.target.column || !link.circularPathData ||
+          !link.target.sourceLinks.some(function(outgoing) {
+            return outgoing.circular && !outgoing.isVirtual &&
+              outgoing.source.column > outgoing.target.column && outgoing.circularLinkType === "top";
+          })) return;
+      var c = link.circularPathData;
+      var room = c.targetY-c.sourceY;
+      var radius = Math.min(c.leftLargeArcRadius,room/2-(circularLinkGap || 0));
+      if (radius < baseRadius+(link.width || 0)/2) return;
+      c.localDownwardRadius = radius;
+      c.sourceX = link.source.x0;
+      c.leftInnerExtent = c.sourceX-c.leftNodeBuffer;
+      c.rightInnerExtent = c.leftInnerExtent;
+      c.leftFullExtent = c.leftInnerExtent-radius;
+      c.rightFullExtent = c.leftFullExtent;
+      c.leftLargeArcRadius = c.leftSmallArcRadius = radius;
+      c.rightLargeArcRadius = c.rightSmallArcRadius = radius;
+      c.verticalBuffer += c.targetY-c.verticalFullExtent;
+      c.verticalFullExtent = c.targetY;
+      c.verticalRightInnerExtent = c.sourceY+radius;
+      c.verticalLeftInnerExtent = c.targetY-radius;
+    });
+  }
+
+  // Lane allocation determines the vertical leg, never the corner size.
+  // Keep that allocation and bridge the horizontal offset with a straight
+  // stub, using one local round radius derived only from the stroke width.
+  if (compactFinalBacklinks && compactSourceTurns) {
+    // An inset source no longer shares its node X with the whole column.
+    // Repack its independent return lanes from current node positions rather
+    // than retaining turn-slot offsets inherited before the source inset.
+    var insetColumns = new Set(graph.nodes.filter(function(node) {
+      return node._insetTopSource;
+    }).map(function(node) { return node.column; }));
+    insetColumns.forEach(function(column) {
+      var group = graph.links.filter(function(link) {
+        return link.circular && !link.isVirtual && link.source.column === column &&
+          link.source.column > link.target.column && link.circularPathData &&
+          !link.circularPathData.mirroredSourceRadius;
+      }).sort(function(a,b) {
+        return a.circularPathData.rightFullExtent-b.circularPathData.rightFullExtent;
+      });
+      group.forEach(function(link,i) {
+        var c = link.circularPathData;
+        var leg = link.source.x1+c.rightNodeBuffer+baseRadius+(link.width||0)/2;
+        function overlaps(other) {
+          var oc = other.circularPathData;
+          return Math.min(Math.max(c.sourceY,c.verticalFullExtent),Math.max(oc.sourceY,oc.verticalFullExtent)) >=
+            Math.max(Math.min(c.sourceY,c.verticalFullExtent),Math.min(oc.sourceY,oc.verticalFullExtent));
+        }
+        function clear(other) {
+          leg = Math.max(leg,other.circularPathData.rightFullExtent+
+            ((link.width||0)+(other.width||0))/2+(circularLinkGap||0));
+        }
+        group.slice(0,i).forEach(function(other) {
+          if (other.circularLinkType === link.circularLinkType || overlaps(other)) clear(other);
+        });
+        graph.links.forEach(function(other) {
+          if (!other.circular || other.isVirtual || !other.circularPathData ||
+              other.circularPathData.localDownwardRadius || other.circularPathData.mirroredSourceRadius) return;
+          if (other.source.column === column && other.target.column === column && overlaps(other)) clear(other);
+          if (other._targetOrderRerouted && other.circularLinkType === link.circularLinkType &&
+              link.target.column < other.target.column && link.source.column < other.source.column &&
+              link.source.column > other.target.column) leg = Math.max(leg,c.rightFullExtent);
+        });
+        c.rightFullExtent = Math.min(c.rightFullExtent,leg);
+      });
+    });
+    graph.links.forEach(function(link) {
+      if (!link.circular || link.isVirtual || link.source.column <= link.target.column ||
+          !link.circularPathData) return;
+      var c = link.circularPathData;
+      var radius = baseRadius+(link.width||0)/2;
+      if (c.mirroredSourceRadius) {
+        c.mirroredSourceFullExtent = link.source.x0-c.rightNodeBuffer-c.mirroredSourceRadius;
+        c.mirroredSourceRadius = radius;
+      } else {
+        c.rightLargeArcRadius = c.rightSmallArcRadius = c.rightSourceLargeArcRadius = radius;
+        c.rightDepartureInnerExtent = c.rightFullExtent-radius;
+        c.rightShelfInnerExtent = c.rightFullExtent-radius;
+        c.verticalRightInnerExtent = c.verticalFullExtent+
+          (link.circularLinkType === "top" ? radius : -radius);
+      }
+    });
+  }
+
+  if (compactFinalBacklinks && compactSourceTurns) {
+    // Mirroring replaces the old right-side turn with a shorter left-side
+    // departure. Release its obsolete shelf padding against final geometry,
+    // while retaining the established inner-to-outer corridor order.
+    function finalTopShelf(link) {
+      var c=link.circularPathData;
+      var source=c.mirroredSourceRadius ? c.mirroredSourceFullExtent-
+        (c.mirroredSourceShelfRadius || c.mirroredSourceRadius) :
+        (c.rightShelfInnerExtent || c.rightInnerExtent);
+      return {x0:Math.min(source,c.leftInnerExtent),x1:Math.max(source,c.leftInnerExtent)};
+    }
+    // Port reordering can leave unoccupied turn slots in a target bundle.
+    // Repack both the target radii and their shelves against final geometry;
+    // moving shelves alone leaves mismatched nested bend centers.
+    var topTargets=new Map();
+    graph.links.forEach(function(link) {
+      if (!link.circular || link.isVirtual || link.circularLinkType!=="top" ||
+          !link.circularPathData || link.source.column<=link.target.column) return;
+      if (!topTargets.has(link.target)) topTargets.set(link.target,[]);
+      topTargets.get(link.target).push(link);
+    });
+    topTargets.forEach(function(bundle) {
+      if (bundle.length<2) return;
+      bundle.sort(function(a,b) { return a.circularPathData.targetY-b.circularPathData.targetY; });
+      bundle.forEach(function(link,i) {
+        if (!i) return;
+        var c=link.circularPathData,previous=bundle[i-1],pc=previous.circularPathData;
+        var gap=circularLinkGap || 0,half=(link.width || 0)/2;
+        var clearance=half+(previous.width || 0)/2+gap;
+        var radius=Math.max(baseRadius+half,pc.leftLargeArcRadius+clearance);
+        // A foreign target lane inside this slot is an occupied boundary.
+        // Use the whole old leg span, including both rounded ends.
+        graph.links.forEach(function(other) {
+          var oc=other.circularPathData;
+          if (bundle.includes(other) || !other.circular || other.isVirtual || !oc ||
+              oc.leftFullExtent<=c.leftFullExtent+1e-6 || oc.leftFullExtent>=c.leftInnerExtent) return;
+          var margin=half+(other.width || 0)/2+gap;
+          if (Math.min(Math.max(c.targetY,c.verticalFullExtent),Math.max(oc.targetY,oc.verticalFullExtent))+margin<
+              Math.max(Math.min(c.targetY,c.verticalFullExtent),Math.min(oc.targetY,oc.verticalFullExtent))) return;
+          radius=Math.max(radius,c.leftInnerExtent-oc.leftFullExtent+margin);
+        });
+        radius=Math.min(c.leftLargeArcRadius,radius);
+        var shrink=c.leftLargeArcRadius-radius;
+        var small=Math.min(c.leftSmallArcRadius,
+          Math.max(baseRadius+half,c.leftSmallArcRadius-shrink));
+        var departure=c.mirroredSourceRadius || c.rightSmallArcRadius;
+        var sourceCorner=c.mirroredSourceRadius ? (c.mirroredSourceShelfRadius || departure) : c.rightLargeArcRadius;
+        var ceiling=Math.min(c.sourceY-departure-sourceCorner-gap,c.targetY-small-radius-gap,
+          pc.verticalFullExtent-Math.max(clearance,radius-pc.leftLargeArcRadius));
+        var shelf=finalTopShelf(link);
+        graph.nodes.forEach(function(node) {
+          if (node.virtual || node===link.source || node===link.target ||
+              node.x1<=shelf.x0 || node.x0>=shelf.x1) return;
+          ceiling=Math.min(ceiling,node.y0-half-gap);
+        });
+        graph.links.forEach(function(other) {
+          var oc=other.circularPathData;
+          if (bundle.includes(other) || !other.circular || other.isVirtual ||
+              other.circularLinkType!=="top" || !oc || oc.localDownwardRadius ||
+              oc.verticalFullExtent<=c.verticalFullExtent+1e-6) return;
+          var os=finalTopShelf(other);
+          if (os.x1<=shelf.x0 || os.x0>=shelf.x1) return;
+          var margin=half+(other.width || 0)/2+gap;
+          if (!selfLinking(other,id) && other.target.column===link.target.column &&
+              c.leftFullExtent<oc.leftFullExtent) margin=Math.max(margin,radius-oc.leftLargeArcRadius);
+          ceiling=Math.min(ceiling,oc.verticalFullExtent-margin);
+        });
+        var nextVfe=Math.max(c.verticalFullExtent,ceiling);
+        c.verticalBuffer-=nextVfe-c.verticalFullExtent;
+        c.leftLargeArcRadius=radius;
+        c.leftSmallArcRadius=small;
+        c.leftFullExtent=c.leftInnerExtent-radius;
+        c.verticalFullExtent=nextVfe;
+        c.verticalLeftInnerExtent=nextVfe+radius;
+        c.verticalRightInnerExtent=nextVfe+sourceCorner;
+      });
+    });
+    graph.links.filter(function(link) {
+      return link.circular && !link.isVirtual && link.circularLinkType==="top" &&
+        link.circularPathData && link.circularPathData.mirroredSourceRadius;
+    }).sort(function(a,b) {
+      return b.circularPathData.verticalFullExtent-a.circularPathData.verticalFullExtent;
+    }).forEach(function(link) {
+      var c=link.circularPathData,gap=circularLinkGap || 0,oldVfe=c.verticalFullExtent;
+      var radius=c.mirroredSourceRadius;
+      var ceiling=Math.min(c.sourceY-radius-(c.mirroredSourceShelfRadius || radius)-gap,
+        c.targetY-c.leftSmallArcRadius-c.leftLargeArcRadius-gap);
+      var shelf=finalTopShelf(link);
+      graph.nodes.forEach(function(node) {
+        if (node.virtual || node===link.source || node===link.target ||
+            node.x1<=shelf.x0 || node.x0>=shelf.x1) return;
+        ceiling=Math.min(ceiling,node.y0-(link.width || 0)/2-gap);
+      });
+      graph.links.forEach(function(inner) {
+        var ic=inner.circularPathData;
+        if (inner===link || !inner.circular || inner.isVirtual ||
+            inner.circularLinkType!=="top" || !ic || ic.localDownwardRadius ||
+            ic.verticalFullExtent<=oldVfe+1e-6) return;
+        var innerShelf=finalTopShelf(inner);
+        if (innerShelf.x1<=shelf.x0 || innerShelf.x0>=shelf.x1) return;
+        var clearance=((link.width || 0)+(inner.width || 0))/2+gap;
+        if (!selfLinking(inner,id) && inner.target.column===link.target.column &&
+            c.leftFullExtent<ic.leftFullExtent)
+          clearance=Math.max(clearance,c.leftLargeArcRadius-ic.leftLargeArcRadius);
+        ceiling=Math.min(ceiling,ic.verticalFullExtent-clearance);
+      });
+      if (ceiling<=oldVfe+1e-6) return;
+      // Move a shared target bundle together. Moving just its inner shelf
+      // destroys the common center of the already nested arrival corners.
+      var bundle=graph.links.filter(function(peer) {
+        return peer.circular && !peer.isVirtual && peer.circularLinkType==="top" &&
+          peer.target===link.target && peer.source.column>peer.target.column;
+      });
+      if (bundle.some(function(peer) {
+        return peer!==link && peer.circularPathData.verticalFullExtent>oldVfe+1e-6;
+      })) return;
+      var shift=ceiling-oldVfe;
+      bundle.forEach(function(peer) {
+        var pc=peer.circularPathData,peerShelf=finalTopShelf(peer);
+        var departure=pc.mirroredSourceRadius || pc.rightSmallArcRadius;
+        var corner=pc.mirroredSourceRadius ? (pc.mirroredSourceShelfRadius || departure) : pc.rightLargeArcRadius;
+        var limit=Math.min(pc.sourceY-departure-corner-gap,
+          pc.targetY-pc.leftSmallArcRadius-pc.leftLargeArcRadius-gap);
+        graph.nodes.forEach(function(node) {
+          if (node.virtual || node===peer.source || node===peer.target ||
+              node.x1<=peerShelf.x0 || node.x0>=peerShelf.x1) return;
+          limit=Math.min(limit,node.y0-(peer.width || 0)/2-gap);
+        });
+        graph.links.forEach(function(other) {
+          var oc=other.circularPathData;
+          if (bundle.includes(other) || !other.circular || other.isVirtual ||
+              other.circularLinkType!=="top" || !oc || oc.localDownwardRadius ||
+              oc.verticalFullExtent<=pc.verticalFullExtent+1e-6) return;
+          var otherShelf=finalTopShelf(other);
+          if (otherShelf.x1<=peerShelf.x0 || otherShelf.x0>=peerShelf.x1) return;
+          var clearance=((peer.width || 0)+(other.width || 0))/2+gap;
+          if (!selfLinking(other,id) && other.target.column===peer.target.column &&
+              pc.leftFullExtent<oc.leftFullExtent)
+            clearance=Math.max(clearance,pc.leftLargeArcRadius-oc.leftLargeArcRadius);
+          limit=Math.min(limit,oc.verticalFullExtent-clearance);
+        });
+        shift=Math.min(shift,limit-pc.verticalFullExtent);
+      });
+      if (shift<=1e-6) return;
+      bundle.forEach(function(peer) {
+        var pc=peer.circularPathData;
+        pc.verticalBuffer-=shift;
+        pc.verticalFullExtent+=shift;
+        pc.verticalLeftInnerExtent=pc.verticalFullExtent+pc.leftLargeArcRadius;
+        pc.verticalRightInnerExtent=pc.verticalFullExtent+
+          (pc.mirroredSourceRadius ? (pc.mirroredSourceShelfRadius || pc.mirroredSourceRadius) : pc.rightLargeArcRadius);
+      });
+    });
+  }
+
+  if (compactFinalBacklinks && compactSourceTurns) {
+    var cornerGroups = new Map();
+    graph.links.forEach(function(link) {
+      var c = link.circularPathData;
+      if (!link.circular || link.isVirtual || !c ||
+          (link.source.column <= link.target.column && !selfLinking(link,id))) return;
+      var mirrored = !!c.mirroredSourceRadius;
+      var key = link.source.column+"|"+link.circularLinkType+"|"+mirrored;
+      if (!cornerGroups.has(key)) cornerGroups.set(key, []);
+      cornerGroups.get(key).push({link:link,c:c,mirrored:mirrored,
+        x:mirrored?c.mirroredSourceFullExtent:c.rightFullExtent,
+        departure:mirrored?c.mirroredSourceRadius:c.rightSmallArcRadius,
+        shelf:mirrored?c.mirroredSourceRadius:c.rightLargeArcRadius});
+    });
+    cornerGroups.forEach(function(group) {
+      // Contiguous parallel lanes need nested radii, not independently small
+      // corners. Keep lane axes fixed and grow only an outer bundle corner.
+      group.sort(function(a,b) { return a.mirrored?b.x-a.x:a.x-b.x; });
+      group.forEach(function(turn,i) {
+        // Self-loops retain their compact geometry but anchor enclosing bends.
+        if (selfLinking(turn.link,id)) return;
+        var c=turn.c,top=turn.link.circularLinkType==="top";
+        var room=Math.abs(c.sourceY-c.verticalFullExtent);
+        for(var j=0;j<i;j++) {
+          var inner=group[j],ic=inner.c;
+          var dx=turn.mirrored?inner.x-turn.x:turn.x-inner.x;
+          var spacing=((turn.link.width||0)+(inner.link.width||0))/2+(circularLinkGap||0);
+          if (Math.abs(dx-spacing)>1e-5) continue;
+          var dy=top?c.sourceY-ic.sourceY:ic.sourceY-c.sourceY;
+          var sourceRoom=turn.mirrored?turn.link.source.x0-c.rightNodeBuffer-turn.x:
+            turn.x-c.sourceX-c.rightNodeBuffer;
+          var departure=inner.departure+Math.min(dx,dy);
+          if (dy>0 && Math.abs(dx-dy)<=(circularLinkGap||0)+1e-5 &&
+              departure<=Math.min(sourceRoom,room-turn.shelf)+1e-5)
+            turn.departure=Math.max(turn.departure,departure);
+          var shelfDelta=top?ic.verticalFullExtent-c.verticalFullExtent:
+            c.verticalFullExtent-ic.verticalFullExtent;
+          // Mirrored departures still turn left at the upper shelf; only
+          // rightward-growing axes can share the same shelf bend center.
+          var shelf=inner.shelf+dx;
+          if (!turn.mirrored && Math.abs(dx-shelfDelta)<1e-5 &&
+              shelf<=Math.min(room-turn.departure,turn.x-c.leftInnerExtent)+1e-5)
+            turn.shelf=Math.max(turn.shelf,shelf);
+        }
+        if (turn.mirrored) {
+          c.mirroredSourceRadius=turn.departure;
+          c.mirroredSourceShelfRadius=turn.shelf;
+        } else {
+          c.rightSmallArcRadius=c.rightSourceLargeArcRadius=turn.departure;
+          c.rightLargeArcRadius=turn.shelf;
+          c.rightDepartureInnerExtent=turn.x-turn.departure;
+          c.rightShelfInnerExtent=turn.x-turn.shelf;
+          c.verticalRightInnerExtent=c.verticalFullExtent+(top?turn.shelf:-turn.shelf);
+        }
+      });
+    });
+  }
+
+  if (compactFinalBacklinks && compactSourceTurns) {
+    // A return to an earlier column can wrap a whole target bundle. Its
+    // shelf corner is independent of the small arrival corner at its node.
+    // Grow only the shelf bend, within both its horizontal and vertical room.
+    ["top","bottom"].forEach(function(band) {
+      var bottom=band==="bottom";
+      var targetCounts=new Map();
+      graph.links.forEach(function(link) {
+        if (link.circular && !link.isVirtual && link.circularLinkType===band &&
+            link.source.column>link.target.column)
+          targetCounts.set(link.target,(targetCounts.get(link.target) || 0)+1);
+      });
+      var turns=graph.links.filter(function(link) {
+        return link.circular && !link.isVirtual && link.circularLinkType===band &&
+          link.circularPathData && !link.circularPathData.localDownwardRadius;
+      }).sort(function(a,b) {
+        return b.circularPathData.leftFullExtent-a.circularPathData.leftFullExtent;
+      });
+      // Different target nodes in one column can already share a nested
+      // corner. Protect both members of that frame before adapting any one
+      // of them around a later column; independent growth breaks their gap.
+      var pairedTargetCorners=new Set();
+      for (var a=0;a<turns.length;a++) {
+        var first=turns[a],fc=first.circularPathData;
+        if (first.source.column<=first.target.column) continue;
+        for (var b=a+1;b<turns.length;b++) {
+          var second=turns[b],sc=second.circularPathData;
+          if (second.source.column<=second.target.column ||
+              first.target.column!==second.target.column) continue;
+          var spacing=((first.width || 0)+(second.width || 0))/2+(circularLinkGap || 0);
+          if (Math.abs(Math.abs(fc.leftFullExtent-sc.leftFullExtent)-spacing)>1e-5 ||
+              Math.abs(Math.abs(fc.verticalFullExtent-sc.verticalFullExtent)-spacing)>1e-5) continue;
+          var centerX=fc.leftFullExtent+fc.leftLargeArcRadius;
+          var otherX=sc.leftFullExtent+sc.leftLargeArcRadius;
+          var centerY=fc.verticalFullExtent+(bottom?-fc.leftLargeArcRadius:fc.leftLargeArcRadius);
+          var otherY=sc.verticalFullExtent+(bottom?-sc.leftLargeArcRadius:sc.leftLargeArcRadius);
+          if (Math.abs(centerX-otherX)>1e-5 || Math.abs(centerY-otherY)>1e-5) continue;
+          pairedTargetCorners.add(first);
+          pairedTargetCorners.add(second);
+        }
+      }
+      turns.forEach(function(link,i) {
+        // A shared-target bundle or paired column corner owns its bend center.
+        if (link.source.column<=link.target.column || targetCounts.get(link.target)>1 ||
+            pairedTargetCorners.has(link)) return;
+        var c=link.circularPathData;
+        var radiusX=c.leftLargeArcRadius, radiusY=c.leftLargeArcRadius;
+        var horizontalEnd=c.rightShelfInnerExtent || c.rightInnerExtent;
+        if (c.mirroredSourceRadius) horizontalEnd=c.mirroredSourceFullExtent-
+          (c.mirroredSourceShelfRadius || c.mirroredSourceRadius);
+        var verticalRoom=Math.abs(c.verticalFullExtent-c.targetY)-c.leftSmallArcRadius;
+        var horizontalRoom=horizontalEnd-c.leftFullExtent;
+        for (var j=0;j<i;j++) {
+          var inner=turns[j],ic=inner.circularPathData;
+          // Same-column arrivals already share allocated target bends;
+          // extending them can cut through local loops beside that column.
+          if (link.target.column>=inner.target.column) continue;
+          var dx=ic.leftFullExtent-c.leftFullExtent;
+          var dy=(bottom?1:-1)*(c.verticalFullExtent-ic.verticalFullExtent);
+          var spacing=((link.width||0)+(inner.width||0))/2+(circularLinkGap||0);
+          var targetOrder=(bottom?1:-1)*(ic.targetY-c.targetY);
+          if (dx<spacing-1e-5 || dy<spacing-1e-5 || targetOrder<0 ||
+              Math.min(dx,dy)>spacing+1e-5) continue;
+          var innerX=ic.leftShelfArcRadius || ic.leftLargeArcRadius;
+          var innerY=ic.leftShelfVerticalRadius || ic.leftLargeArcRadius;
+          // A circle plus the required clearance fits inside these enclosing
+          // quarter-ellipse axes. Already elliptical corners need a separate
+          // clearance calculation, so do not use them as nesting anchors.
+          if (Math.abs(innerX-innerY)>1e-5) continue;
+          var nestedX=innerX+dx, nestedY=innerY+dy;
+          if (nestedX<=horizontalRoom+1e-5 && nestedY<=verticalRoom+1e-5) {
+            radiusX=Math.max(radiusX,nestedX);
+            radiusY=Math.max(radiusY,nestedY);
+          }
+        }
+        // A flat ellipse can pinch its inner stroke or look like a sharp
+        // elbow even before folding. Limit the axis ratio to 2:1; larger
+        // column offsets remain straight shelf segments beside a round bend.
+        var minCurvature=Math.min(radiusX*radiusX/radiusY,radiusY*radiusY/radiusX);
+        var stretched=Math.max(radiusX,radiusY)>2*Math.min(radiusX,radiusY)+1e-5;
+        if (stretched || minCurvature<baseRadius+(link.width || 0)/2-1e-5)
+          radiusX=radiusY=Math.min(radiusX,radiusY);
+        if (radiusX>c.leftLargeArcRadius+1e-5 || radiusY>c.leftLargeArcRadius+1e-5) {
+          c.leftShelfArcRadius=radiusX;
+          c.leftShelfVerticalRadius=radiusY;
+          c.leftShelfInnerExtent=c.leftFullExtent+radiusX;
+          c.verticalLeftInnerExtent=c.verticalFullExtent+(bottom?-radiusY:radiusY);
+        }
+      });
+    });
+  }
 
   graph.links.forEach(function(link) {
     if (link.circular) {
@@ -6788,61 +7745,80 @@ function circularLinksActuallyCross(link1, link2) {
 // create a d path using the addCircularPathData
 function createCircularPathString(link) {
   var pathString = "";
+  var local = link.circularPathData;
+  if (local.localDownwardRadius) {
+    var radius = local.localDownwardRadius;
+    return "M"+local.sourceX+" "+local.sourceY+
+      " L"+local.leftInnerExtent+" "+local.sourceY+
+      " A"+radius+" "+radius+" 0 0 0 "+local.leftFullExtent+" "+(local.sourceY+radius)+
+      " L"+local.leftFullExtent+" "+(local.targetY-radius)+
+      " A"+radius+" "+radius+" 0 0 0 "+local.leftInnerExtent+" "+local.targetY+
+      " L"+local.targetX+" "+local.targetY;
+  }
 
   if (link.circularLinkType == "top") {
+    var c = link.circularPathData;
+    var mirrored = c.mirroredSourceRadius;
+    var sourceX = mirrored ? link.source.x0 : c.sourceX;
+    var mirroredFull = c.mirroredSourceFullExtent;
+    if (mirrored && typeof mirroredFull !== "number") mirroredFull = sourceX-c.rightNodeBuffer-mirrored;
+    var sourceInner = mirrored ? mirroredFull+mirrored : (c.rightDepartureInnerExtent || c.rightInnerExtent);
+    var sourceFull = mirrored ? mirroredFull : c.rightFullExtent;
+    var sourceCorner = mirrored ? (c.mirroredSourceShelfRadius || mirrored) : c.rightLargeArcRadius;
+    var sourceShelf = mirrored ? sourceFull-sourceCorner : (c.rightShelfInnerExtent || c.rightInnerExtent);
     pathString =
       // start at the left of the source node
       "M" +
-      link.circularPathData.sourceX +
+      sourceX +
       " " +
       link.circularPathData.sourceY +
       " " +
       // line left to buffer point
       "L" +
-      link.circularPathData.rightInnerExtent +
+      sourceInner +
       " " +
       link.circularPathData.sourceY +
       " " +
       // Arc around: Centre of arc X and  //Centre of arc Y
       "A" +
-      link.circularPathData.rightLargeArcRadius +
+      (mirrored || c.rightSourceLargeArcRadius || c.rightLargeArcRadius) +
       " " +
-      link.circularPathData.rightSmallArcRadius +
-      " 0 0 0 " +
+      (mirrored || c.rightSmallArcRadius) +
+      (mirrored ? " 0 0 1 " : " 0 0 0 ") +
       // End of arc X //End of arc Y
-      link.circularPathData.rightFullExtent +
+      sourceFull +
       " " +
       (link.circularPathData.sourceY -
-        link.circularPathData.rightSmallArcRadius) +
+        (mirrored || c.rightSmallArcRadius)) +
       " " + // End of arc X
       // line up to buffer point
       "L" +
-      link.circularPathData.rightFullExtent +
+      sourceFull +
       " " +
-      link.circularPathData.verticalRightInnerExtent +
+      (mirrored ? c.verticalFullExtent+sourceCorner : c.verticalRightInnerExtent) +
       " " +
       // Arc around: Centre of arc X and  //Centre of arc Y
       "A" +
-      link.circularPathData.rightLargeArcRadius +
+      sourceCorner +
       " " +
-      link.circularPathData.rightLargeArcRadius +
+      sourceCorner +
       " 0 0 0 " +
       // End of arc X //End of arc Y
-      link.circularPathData.rightInnerExtent +
+      sourceShelf +
       " " +
       link.circularPathData.verticalFullExtent +
       " " + // End of arc X
       // line right to buffer point
       "L" +
-      link.circularPathData.leftInnerExtent +
+      (link.circularPathData.leftShelfInnerExtent || link.circularPathData.leftInnerExtent) +
       " " +
       link.circularPathData.verticalFullExtent +
       " " +
       // Arc around: Centre of arc X and  //Centre of arc Y
       "A" +
-      link.circularPathData.leftLargeArcRadius +
+      (link.circularPathData.leftShelfArcRadius || link.circularPathData.leftLargeArcRadius) +
       " " +
-      link.circularPathData.leftLargeArcRadius +
+      (link.circularPathData.leftShelfVerticalRadius || link.circularPathData.leftLargeArcRadius) +
       " 0 0 0 " +
       // End of arc X //End of arc Y
       link.circularPathData.leftFullExtent +
@@ -6883,13 +7859,13 @@ function createCircularPathString(link) {
       " " +
       // line left to buffer point
       "L" +
-      link.circularPathData.rightInnerExtent +
+      (link.circularPathData.rightDepartureInnerExtent || link.circularPathData.rightInnerExtent) +
       " " +
       link.circularPathData.sourceY +
       " " +
       // Arc around: Centre of arc X and  //Centre of arc Y
       "A" +
-      link.circularPathData.rightLargeArcRadius +
+      (link.circularPathData.rightSourceLargeArcRadius || link.circularPathData.rightLargeArcRadius) +
       " " +
       link.circularPathData.rightSmallArcRadius +
       " 0 0 1 " +
@@ -6912,21 +7888,21 @@ function createCircularPathString(link) {
       link.circularPathData.rightLargeArcRadius +
       " 0 0 1 " +
       // End of arc X //End of arc Y
-      link.circularPathData.rightInnerExtent +
+      (link.circularPathData.rightShelfInnerExtent || link.circularPathData.rightInnerExtent) +
       " " +
       link.circularPathData.verticalFullExtent +
       " " + // End of arc X
       // line right to buffer point
       "L" +
-      link.circularPathData.leftInnerExtent +
+      (link.circularPathData.leftShelfInnerExtent || link.circularPathData.leftInnerExtent) +
       " " +
       link.circularPathData.verticalFullExtent +
       " " +
       // Arc around: Centre of arc X and  //Centre of arc Y
       "A" +
-      link.circularPathData.leftLargeArcRadius +
+      (link.circularPathData.leftShelfArcRadius || link.circularPathData.leftLargeArcRadius) +
       " " +
-      link.circularPathData.leftLargeArcRadius +
+      (link.circularPathData.leftShelfVerticalRadius || link.circularPathData.leftLargeArcRadius) +
       " 0 0 1 " +
       // End of arc X //End of arc Y
       link.circularPathData.leftFullExtent +

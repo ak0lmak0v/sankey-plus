@@ -1,3 +1,4 @@
+import {positionColumns} from "./columnSpacing.js";
 import {groups, sum, min, max} from "d3";
 
 export function adjustSankeySize(
@@ -10,7 +11,8 @@ export function adjustSankeySize(
   circularLinkPortionTopBottom,
   circularLinkPortionLeftRight,
   scale,
-  baseRadius
+  baseRadius,
+  columnSpacing
 ) {
   let graph = inputGraph;
 
@@ -125,12 +127,7 @@ export function adjustSankeySize(
       right: totalRightLinksWidth,
     };
 
-    graph.nodes.forEach(function (node) {
-      node.x0 =
-        graph.x0 +
-        node.column * ((graph.x1 - graph.x0 - nodeWidth) / maxColumn);
-      node.x1 = node.x0 + nodeWidth;
-    });
+    positionColumns(graph, nodeWidth, columnSpacing);
   }
 
   return graph;

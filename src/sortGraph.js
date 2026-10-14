@@ -529,6 +529,13 @@ export function sortTargetLinks(inputGraph, id, typeOrder, typeAccessor) {
               return lfe2 - lfe1;
             }
           } else {
+            // Backlinks from farther source columns must wrap around local
+            // ones at a shared target. A previous shelf height is provisional
+            // and must not reverse this interval nesting at the next sort.
+            if (link1.source.column > link1.target.column &&
+                link2.source.column > link2.target.column && d1 !== d2) {
+              return d1 - d2;
+            }
             // TOP-band ports are assigned top->bottom. Match the inverse of
             // the shelf order: inner shelves have larger VFE and enter higher,
             // while outer shelves wrap around them and enter lower.
@@ -552,6 +559,32 @@ export function sortTargetLinks(inputGraph, id, typeOrder, typeAccessor) {
         }
       });
     }
+
+    // Node order may have changed after the previous shelf calculation. Within
+    // a source-column bundle, current departure ports then outrank stale shelf
+    // heights. Keep its existing slots among other columns and reorder only
+    // this bundle, so both ends retain the same inner-to-outer nesting.
+    var reorderedBundles = new Map();
+    nodesTargetLinks.forEach(function(link,index) {
+      if (!link.circular || link.isVirtual || link.source.column <= link.target.column) return;
+      var key = link.source.column + "|" + link.circularLinkType;
+      if (!reorderedBundles.has(key)) reorderedBundles.set(key, []);
+      reorderedBundles.get(key).push({ link: link, index: index });
+    });
+    reorderedBundles.forEach(function(slots) {
+      if (slots.length < 2 || !slots.some(function(slot) {
+        return slot.link.source._sourceCorridorReordered || slot.link.source._outerTopSource;
+      })) return;
+      var bottom = slots[0].link.circularLinkType === "bottom";
+      var ordered = slots.map(function(slot) { return slot.link; }).sort(function(a,b) {
+        if (!bottom && (a.source._outerTopSource || b.source._outerTopSource)) {
+          var outerDifference = Number(!!a.source._outerTopSource)-Number(!!b.source._outerTopSource);
+          if (outerDifference) return outerDifference;
+        }
+        return bottom ? b.y0-a.y0 : a.y0-b.y0;
+      });
+      slots.forEach(function(slot,i) { nodesTargetLinks[slot.index] = ordered[i]; });
+    });
 
     // Assign y1 ports using two explicit bands (no interleaving):
     // - TOP band: all non-bottom links (including top circular + non-circular)
