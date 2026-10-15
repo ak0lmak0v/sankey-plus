@@ -198,28 +198,54 @@ for (const width of [1200,1800,2800]) test(`shared bottom targets never reverse 
   }
 });
 
-const {parsePath,samplePath,minDistance}=require('./helpers/circular-path-geometry.cjs');
-for(const width of [1200,1800,2800]) test(`source wraps preserve round bends and neighboring loop clearance: ${width}`, () => {
-  const chart=make(portBridgeGraph(),{width,height:1000,scale:0.45});
-  const local=chart.graph.links.find(l=>l.source.name==='upper'&&l.target.name==='lower');
-  const wrapped=chart.graph.links.filter(l=>l.circularPathData?.sourcePortWrap);
-  assert.ok(wrapped.length,'Exercise a formerly reversed top departure');
-  for(const link of wrapped) {
-    const c=link.circularPathData,w=c.sourcePortWrap,sign=link.circularLinkType==='bottom'?-1:1;
-    close(parsePath(link.path)[0].nums[0],link.source.x1);
-    for(const r of [w.departureRadius,w.rightRadius,w.leftRadius,w.shelfRadius])
-      assert.ok(r>=link.width/2+5-1e-5,'Every source wrap must preserve its inner stroke edge');
-    assert.ok(sign*(c.sourceY-w.y)>=w.rightRadius+w.departureRadius-1e-5,'Right source leg must not reverse');
-    assert.ok(sign*(w.y-c.verticalFullExtent)>=w.leftRadius+w.shelfRadius-1e-5,'Left source leg must not reverse');
-    for(const other of chart.graph.links.filter(l=>l.circular&&!l.isVirtual&&l!==link)) {
+const {parsePath,arcToCenter,samplePath,minDistance}=require('./helpers/circular-path-geometry.cjs');
+function assertRoundRoute(link) {
+  const commands=parsePath(link.path),start=commands[0].nums;
+  close(start[0],link.source.x1,'A return must leave its source right edge');
+  const end=commands.at(-1).nums;
+  close(end[0],link.target.x0,'A return must enter its target left edge');
+  const unit=v=>{const length=Math.hypot(...v);return length>1e-9?v.map(x=>x/length):null;};
+  let x=start[0],y=start[1],previous=null;
+  for(const command of commands.slice(1)) {
+    let incoming,outgoing,next;
+    if(command.cmd==='L') {
+      next=command.nums;
+      incoming=outgoing=unit([next[0]-x,next[1]-y]);
+    } else {
+      assert.equal(command.cmd,'A');
+      const [rx,ry,rotation,large,sweep,ex,ey]=command.nums;
+      const arc=arcToCenter(x,y,rx,ry,rotation,large,sweep,ex,ey);
+      assert.ok(Math.abs(arc.dtheta)<=Math.PI/2+1e-5,'A corner must not become an enlarged half-turn');
+      const curvature=Math.min(arc.rx**2/arc.ry,arc.ry**2/arc.rx);
+      assert.ok(curvature>=link.width/2+5-1e-5,'The inner stroke edge must not fold at a corner');
+      const tangent=theta=>unit([
+        Math.sign(arc.dtheta)*(-arc.rx*Math.sin(theta)*Math.cos(arc.phi)-arc.ry*Math.cos(theta)*Math.sin(arc.phi)),
+        Math.sign(arc.dtheta)*(-arc.rx*Math.sin(theta)*Math.sin(arc.phi)+arc.ry*Math.cos(theta)*Math.cos(arc.phi))]);
+      incoming=tangent(arc.theta1);outgoing=tangent(arc.theta1+arc.dtheta);next=[ex,ey];
+    }
+    if(previous&&incoming) assert.ok(previous[0]*incoming[0]+previous[1]*incoming[1]>=1-1e-5,
+      'Adjacent segments must meet tangentially without a reversal or kink');
+    if(outgoing) previous=outgoing;
+    [x,y]=next;
+  }
+}
+for(const width of [1200,1800,2800]) test(`complete circular routes preserve joins and neighboring clearance: ${width}`,()=>{
+  const chart=make(portBridgeGraph(),{width,height:1000,scale:.45});
+  const links=chart.graph.links.filter(l=>l.circular&&!l.isVirtual);
+  assert.ok(links.length>=5);
+  for(const link of links) {
+    assertRoundRoute(link);
+    for(const other of links.filter(l=>l!==link)) {
       const margin=(link.width+other.width)/2;
-      // Endpoint sides and bend bounds are asserted separately. Compare the
-      // external corridors, where round-distance clearance is conservative;
-      // at a butt cap it would incorrectly treat a horizontal port as a disk.
       const endpoints=[link.source,link.target,other.source,other.target];
       const outside=p=>endpoints.every(n=>p[0]<n.x0-margin||p[0]>n.x1+margin||p[1]<n.y0-margin||p[1]>n.y1+margin);
-      const distance=minDistance(samplePath(link.path,160).filter(outside),samplePath(other.path,160).filter(outside));
-      assert.ok(distance+.3>=margin,'Source wrap must clear '+other.source.name+' → '+other.target.name);
+      assert.ok(minDistance(samplePath(link.path,160).filter(outside),samplePath(other.path,160).filter(outside))+.3>=margin,
+        'Return must clear '+other.source.name+' → '+other.target.name);
+    }
+    for(const node of chart.graph.nodes.filter(n=>!n.virtual&&n!==link.source&&n!==link.target)) {
+      const clearance=Math.min(...samplePath(link.path,160).map(([x,y])=>Math.hypot(
+        Math.max(node.x0-x,0,x-node.x1),Math.max(node.y0-y,0,y-node.y1))));
+      assert.ok(clearance+.3>=link.width/2,'A return must not cut through another node');
     }
   }
 });
@@ -259,4 +285,17 @@ for(const width of [1200,1800,2800]) test(`upward returns bypass earlier source 
     assert.ok(minDistance(samplePath(a.path,100).filter(outside),samplePath(b.path,100).filter(outside))+.3>=margin,
       'Reassigning source corridors must preserve neighboring return clearance: '+a.source.name+' / '+b.source.name);
   }
+});
+
+for(const separateTarget of [false,true]) for(const width of [1200,1800,2800])
+test(`both return bands keep their departure beside the source right edge: ${width}, separate ${separateTarget}`,()=>{
+ const chart=make(rightwardMixedSourceGraph(separateTarget),{width,height:1000,scale:.45});
+ for(const link of chart.graph.links.filter(l=>l.circular&&!l.isVirtual&&l.source.column>l.target.column)) {
+  const points=samplePath(link.path,160),top=link.circularLinkType==='top';
+  const shelf=(top?Math.min:Math.max)(...points.map(p=>p[1]));
+  const end=points.findIndex(p=>Math.abs(p[1]-shelf)<1e-5);
+  assert.ok(end>0);
+  assert.ok(points.slice(0,end).every(p=>p[0]>=link.source.x1-1e-5),
+   link.source.name+' → '+link.target.name+' must not turn back through its source column before reaching its shelf');
+ }
 });

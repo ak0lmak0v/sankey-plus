@@ -143,4 +143,4 @@ function minDistance(aPts, bPts) {
 
 
 
-module.exports={parsePath,samplePath,minDistance};
+module.exports={parsePath,arcToCenter,samplePath,minDistance};

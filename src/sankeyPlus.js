@@ -2541,8 +2541,8 @@ class SankeyChart {
 
     this.graph.nodes.forEach(function(node) {
       delete node._sourceCorridorReordered;
+      delete node._staggeredReturnSource;
       delete node._mirrorTopSource;
-        delete node._mirrorBottomSource;
       delete node._outerTopSource;
       delete node._insetTopSource;
     });
@@ -2916,8 +2916,8 @@ class SankeyChart {
       var sourceColumns = new Map();
       this.graph.nodes.forEach(function(node) {
         delete node._sourceCorridorReordered;
+        delete node._staggeredReturnSource;
         delete node._mirrorTopSource;
-        delete node._mirrorBottomSource;
         delete node._outerTopSource;
         delete node._insetTopSource;
         if (node.virtual) return;
@@ -2954,8 +2954,8 @@ class SankeyChart {
             else node._mirrorTopSource = true;
           });
           if (interleaved) {
-            // Keep a shared destination bundle aligned. Independent bundles
-            // may inset their source node while preserving the existing lane.
+            // Independent bundles may inset a source into the preceding gap.
+            // Shared bundles reserve right-hand corridors for both bands.
             var sharesBottomBundle = nodes.some(function(node) {
               if (!node._mirrorTopSource) return false;
               var destinations = node.sourceLinks.filter(function(link) {
@@ -2970,8 +2970,8 @@ class SankeyChart {
               });
             });
             if (sharesBottomBundle) {
-              // Upward returns stay to the right of earlier source nodes.
-              // Earlier downward returns cross the gap below their source.
+              // Separate mixed sources horizontally, so both bands can leave
+              // on the right without borrowing the incoming corridor.
               var crossingSources=nodes.filter(function(source) {
                 return nodes.some(later=>later.y0>source.y0&&hasTopReturn(later)) &&
                   source.sourceLinks.some(l=>l.circular&&!l.isVirtual&&l.source.column>l.target.column);
@@ -3000,19 +3000,39 @@ class SankeyChart {
               nodes.forEach(function(node,i) {
                 var height=node.y1-node.y0;node.y0=y;node.y1=y+height;y=node.y1+(sourceGaps[i]||0);
               });
-              nodes.forEach(function(source) {
+              var cursor=nodes[0].x0;
+              nodes.forEach(function(source,index) {
+                if(index) {
+                  var leftRoom=0;
+                  ["top","bottom"].forEach(function(band) {
+                    var loops=source.sourceLinks.filter(l=>l.circular&&!l.isVirtual&&l.target===source&&l.circularLinkType===band);
+                    if(loops.length) leftRoom=Math.max(leftRoom,self.config.links.baseRadius+Math.max.apply(null,loops.map(l=>l.circularPathData.leftNodeBuffer))+
+                      loops.reduce((sum,l)=>sum+(l.width||0)+self.config.links.circularGap,0));
+                  });
+                  cursor+=leftRoom;
+                }
                 delete source._mirrorTopSource;
                 delete source._outerTopSource;
-                source._sourceCorridorReordered = true;
-                source._mirrorBottomSource = nodes.some(function(later) {
-                  return later.y0 > source.y0 && hasTopReturn(later);
-                }) && source.sourceLinks.some(function(link) {
-                  return link.circular && !link.isVirtual && link.source.column > link.target.column &&
-                    link.circularLinkType === "bottom";
+                source._sourceCorridorReordered=true;
+                source._staggeredReturnSource=true;
+                var width=source.x1-source.x0;
+                source.x0=cursor;source.x1=cursor+width;
+                var rightRoom=0;
+                ["top","bottom"].forEach(function(band) {
+                  var links=source.sourceLinks.filter(l=>l.circular&&!l.isVirtual&&l.circularLinkType===band);
+                  var total=links.reduce((sum,l)=>sum+(l.width||0)+self.config.links.circularGap,0);
+                  var bridge=links.filter(l=>l.target!==source&&l.target.column===source.column)
+                    .reduce((largest,l)=>Math.max(largest,(l.width||0)/2+self.config.links.baseRadius),0);
+                  rightRoom=Math.max(rightRoom,total+bridge);
                 });
+                var buffers=source.sourceLinks.filter(l=>l.circular&&!l.isVirtual&&l.circularPathData)
+                  .map(l=>l.circularPathData.rightNodeBuffer);
+                var buffer=buffers.length?Math.max.apply(null,buffers):0;
+                cursor=source.x1+rightRoom+2*self.config.links.baseRadius+buffer+self.config.links.circularGap;
               });
               return;
             }
+
             var mirroredLinks = [];
             nodes.forEach(function(node) {
               if (!node._mirrorTopSource) return;
@@ -3104,13 +3124,9 @@ class SankeyChart {
         for(var i=1;i<nodes.length;i++) {
           var node=nodes[i];
           var top=node.sourceLinks.filter(l=>l.circular&&!l.isVirtual&&l.source.column>l.target.column&&l.circularLinkType==="top");
-          var previous=nodes[i-1];
-          var bottom=previous._mirrorBottomSource ? previous.sourceLinks.filter(l=>l.circular&&!l.isVirtual&&
-            l.source.column>l.target.column&&l.circularLinkType==="bottom") : [];
-          if (!top.length && !bottom.length) continue;
+          if (!top.length) continue;
           var room=node._mirrorTopSource&&!node._insetTopSource ?
             top.reduce((sum,l)=>sum+(l.width||0)+wrapGap,0)+2*wrapBase+wrapGap : 0;
-          if(bottom.length) room=Math.max(room,bottom.reduce((sum,l)=>sum+(l.width||0)+wrapGap,0)+2*wrapBase+wrapGap);
           node.targetLinks.forEach(function(incoming) {
             if (!incoming.circular || incoming.isVirtual || incoming.source!==nodes[i-1]) return;
             var localFrames=incoming.source.sourceLinks.filter(l=>l.circular&&!l.isVirtual&&

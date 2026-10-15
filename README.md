@@ -127,20 +127,22 @@ new SankeyChart({
 source departures. With one upward-return source in a column, it places that
 node before downward-return sources and compacts their source turns. This can
 change the specified vertical node order. If several nodes return in both
-directions, their vertical order is preserved. Independent destination bundles
-can inset the lower source node horizontally, retaining its right-side exit
-with round local corners. The preceding return lanes and upper departures bound
-the inset; only missing corridor room is added before that column. Shared
-bottom destination bundles remain aligned. In mixed columns with shared lower
-returns, upward departures stay to the right of the preceding source nodes.
-The source order follows destination nesting; earlier downward departures take
-short rounded turns below their nodes into the preceding corridor. The target
-port order follows those source corridors, keeping lower bundles nested.
+directions, independent destination bundles can inset the lower source node
+horizontally, retaining its right-side exit with round local corners. The
+preceding return lanes and upper departures bound that inset.
+
+Mixed sources with shared lower destinations follow destination nesting and
+reserve separate horizontal source corridors within their logical column.
+Both upward and downward returns keep an ordinary right-side departure;
+repairing one band does not move a reverse bend into the other band. Local
+self-loop frames contribute to the reserved room on both sides of each node.
+Target port ordering follows the physical source order.
 
 With this repair enabled, links between separate nodes in one column retain
 right-side source and left-side target ports. When space permits, a downward
 connection crosses the gap above its target, clearing the source's local loops;
-otherwise it retains its full outer loop. Opposite departures keep their lane
+horizontally separated nodes use two round turns in their intervening corridor.
+Other connections retain their full outer loop. Opposite departures keep their lane
 gaps as the whole bundle moves outside the short bridge. Only missing corridor
 width is added before following columns, with endpoint geometry and enclosing
 source frames moving together.
@@ -183,3 +185,16 @@ their final node positions. A departure starts with the node buffer and local
 corner radius; additional offset is reserved only for neighboring lanes, local
 loops, or an enclosing rerouted return. Legacy column turn-slot offsets do not
 keep these departures artificially far from their nodes.
+
+## Tests
+
+Run `npm ci` and `npm test`. The command rebuilds the library and runs the
+self-contained test suites, passing explicit filenames to support Node 20.
+The synthetic layout cases verify both return bands together: endpoint sides,
+source-to-shelf routing, tangent continuity, inner stroke curvature, node
+clearance, and neighboring return separation at three widths.
+
+Historical suites depending on demo HTML/JSON files are retained and can be
+run with `npm run test:legacy` when those fixtures are available locally.
+Those fixtures are not included in this repository or required by CI. Do not
+add customer reports or production event datasets as public test fixtures.

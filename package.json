@@ -14,7 +14,8 @@
   "license": "ISC",
   "scripts": {
     "build": "rimraf dist && webpack --mode production --config webpack.build.config.js",
-    "test": "npm run build && node --test \"test/**/*.test.js\""
+    "test": "npm run build && node scripts/run-tests.cjs",
+    "test:legacy": "node scripts/run-tests.cjs --legacy"
   },
   "devDependencies": {
     "@babel/core": "^7.16.12",
