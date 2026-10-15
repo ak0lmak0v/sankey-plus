@@ -577,6 +577,11 @@ export function sortTargetLinks(inputGraph, id, typeOrder, typeAccessor) {
       })) return;
       var bottom = slots[0].link.circularLinkType === "bottom";
       var ordered = slots.map(function(slot) { return slot.link; }).sort(function(a,b) {
+        if (bottom) {
+          var mirroredDifference=Number(!!b.source._mirrorBottomSource)-Number(!!a.source._mirrorBottomSource);
+          if(mirroredDifference) return mirroredDifference;
+          if(a.source._mirrorBottomSource&&b.source._mirrorBottomSource) return a.y0-b.y0;
+        }
         if (!bottom && (a.source._outerTopSource || b.source._outerTopSource)) {
           var outerDifference = Number(!!a.source._outerTopSource)-Number(!!b.source._outerTopSource);
           if (outerDifference) return outerDifference;

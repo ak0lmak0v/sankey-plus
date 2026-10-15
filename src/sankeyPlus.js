@@ -2542,6 +2542,7 @@ class SankeyChart {
     this.graph.nodes.forEach(function(node) {
       delete node._sourceCorridorReordered;
       delete node._mirrorTopSource;
+        delete node._mirrorBottomSource;
       delete node._outerTopSource;
       delete node._insetTopSource;
     });
@@ -2916,6 +2917,7 @@ class SankeyChart {
       this.graph.nodes.forEach(function(node) {
         delete node._sourceCorridorReordered;
         delete node._mirrorTopSource;
+        delete node._mirrorBottomSource;
         delete node._outerTopSource;
         delete node._insetTopSource;
         if (node.virtual) return;
@@ -2967,7 +2969,50 @@ class SankeyChart {
                 });
               });
             });
-            if (sharesBottomBundle) return;
+            if (sharesBottomBundle) {
+              // Upward returns stay to the right of earlier source nodes.
+              // Earlier downward returns cross the gap below their source.
+              var crossingSources=nodes.filter(function(source) {
+                return nodes.some(later=>later.y0>source.y0&&hasTopReturn(later)) &&
+                  source.sourceLinks.some(l=>l.circular&&!l.isVirtual&&l.source.column>l.target.column);
+              });
+              function topColumn(node) {
+                return Math.min.apply(null,node.sourceLinks.filter(l=>l.circular&&!l.isVirtual&&
+                  l.source.column>l.target.column&&l.circularLinkType==="top").map(l=>l.target.column));
+              }
+              var firstTopColumn=Math.min.apply(null,crossingSources.map(topColumn));
+              var orderedSources=crossingSources.slice().sort(function(a,b) {
+                var aTop=topColumn(a),bTop=topColumn(b);
+                if(!Number.isFinite(aTop)) aTop=firstTopColumn;
+                if(!Number.isFinite(bTop)) bTop=firstTopColumn;
+                if(aTop!==bTop) return bTop-aTop;
+                function destination(node) {
+                  var returns=node.sourceLinks.filter(l=>l.circular&&!l.isVirtual&&l.source.column>l.target.column);
+                  var bottom=returns.filter(l=>l.circularLinkType==="bottom");
+                  return (bottom.length?bottom:returns).map(l=>l.target).sort((a,b)=>b.column-a.column||b.y0-a.y0)[0];
+                }
+                var at=destination(a),bt=destination(b);
+                return bt.column-at.column||bt.y0-at.y0||a.y0-b.y0;
+              });
+              var sourceGaps=nodes.slice(1).map((node,i)=>node.y0-nodes[i].y1);
+              var orderedIndex=0,y=nodes[0].y0;
+              nodes=nodes.map(node=>crossingSources.includes(node)?orderedSources[orderedIndex++]:node);
+              nodes.forEach(function(node,i) {
+                var height=node.y1-node.y0;node.y0=y;node.y1=y+height;y=node.y1+(sourceGaps[i]||0);
+              });
+              nodes.forEach(function(source) {
+                delete source._mirrorTopSource;
+                delete source._outerTopSource;
+                source._sourceCorridorReordered = true;
+                source._mirrorBottomSource = nodes.some(function(later) {
+                  return later.y0 > source.y0 && hasTopReturn(later);
+                }) && source.sourceLinks.some(function(link) {
+                  return link.circular && !link.isVirtual && link.source.column > link.target.column &&
+                    link.circularLinkType === "bottom";
+                });
+              });
+              return;
+            }
             var mirroredLinks = [];
             nodes.forEach(function(node) {
               if (!node._mirrorTopSource) return;
@@ -3059,9 +3104,13 @@ class SankeyChart {
         for(var i=1;i<nodes.length;i++) {
           var node=nodes[i];
           var top=node.sourceLinks.filter(l=>l.circular&&!l.isVirtual&&l.source.column>l.target.column&&l.circularLinkType==="top");
-          if (!top.length) continue;
+          var previous=nodes[i-1];
+          var bottom=previous._mirrorBottomSource ? previous.sourceLinks.filter(l=>l.circular&&!l.isVirtual&&
+            l.source.column>l.target.column&&l.circularLinkType==="bottom") : [];
+          if (!top.length && !bottom.length) continue;
           var room=node._mirrorTopSource&&!node._insetTopSource ?
             top.reduce((sum,l)=>sum+(l.width||0)+wrapGap,0)+2*wrapBase+wrapGap : 0;
+          if(bottom.length) room=Math.max(room,bottom.reduce((sum,l)=>sum+(l.width||0)+wrapGap,0)+2*wrapBase+wrapGap);
           node.targetLinks.forEach(function(incoming) {
             if (!incoming.circular || incoming.isVirtual || incoming.source!==nodes[i-1]) return;
             var localFrames=incoming.source.sourceLinks.filter(l=>l.circular&&!l.isVirtual&&

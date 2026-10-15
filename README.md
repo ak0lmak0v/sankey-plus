@@ -131,19 +131,19 @@ directions, their vertical order is preserved. Independent destination bundles
 can inset the lower source node horizontally, retaining its right-side exit
 with round local corners. The preceding return lanes and upper departures bound
 the inset; only missing corridor room is added before that column. Shared
-bottom destination bundles remain aligned. Their upward returns depart from the
-right and take a short rounded turn above their source to reach the preceding
-corridor. This also reserves space beside earlier local loops. Upper sources keep their right-side exits and wrap outside
-inner returns at the shelf and target ports. Enable it to avoid opposite source
-corridors crossing while keeping return lanes compact.
+bottom destination bundles remain aligned. In mixed columns with shared lower
+returns, upward departures stay to the right of the preceding source nodes.
+The source order follows destination nesting; earlier downward departures take
+short rounded turns below their nodes into the preceding corridor. The target
+port order follows those source corridors, keeping lower bundles nested.
 
 With this repair enabled, links between separate nodes in one column retain
 right-side source and left-side target ports. When space permits, a downward
 connection crosses the gap above its target, clearing the source's local loops;
-otherwise it retains its full outer loop. Upward departures from the lower
-node keep their lane gaps as the whole bundle moves outside the short bridge.
-Only missing corridor width is added before the following columns, with
-endpoint geometry and enclosing source frames moving together.
+otherwise it retains its full outer loop. Opposite departures keep their lane
+gaps as the whole bundle moves outside the short bridge. Only missing corridor
+width is added before following columns, with endpoint geometry and enclosing
+source frames moving together.
 
 With `nodes.circularSourceOrdering` enabled, inter-column return departures use
 `baseRadius + link.width / 2` as the minimum local round radius. The vertical

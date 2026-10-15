@@ -205,12 +205,12 @@ for(const width of [1200,1800,2800]) test(`source wraps preserve round bends and
   const wrapped=chart.graph.links.filter(l=>l.circularPathData?.sourcePortWrap);
   assert.ok(wrapped.length,'Exercise a formerly reversed top departure');
   for(const link of wrapped) {
-    const c=link.circularPathData,w=c.sourcePortWrap;
+    const c=link.circularPathData,w=c.sourcePortWrap,sign=link.circularLinkType==='bottom'?-1:1;
     close(parsePath(link.path)[0].nums[0],link.source.x1);
     for(const r of [w.departureRadius,w.rightRadius,w.leftRadius,w.shelfRadius])
       assert.ok(r>=link.width/2+5-1e-5,'Every source wrap must preserve its inner stroke edge');
-    assert.ok(w.y+w.rightRadius<=c.sourceY-w.departureRadius+1e-5,'Right source leg must not reverse');
-    assert.ok(c.verticalFullExtent+w.shelfRadius<=w.y-w.leftRadius+1e-5,'Left source leg must not reverse');
+    assert.ok(sign*(c.sourceY-w.y)>=w.rightRadius+w.departureRadius-1e-5,'Right source leg must not reverse');
+    assert.ok(sign*(w.y-c.verticalFullExtent)>=w.leftRadius+w.shelfRadius-1e-5,'Left source leg must not reverse');
     for(const other of chart.graph.links.filter(l=>l.circular&&!l.isVirtual&&l!==link)) {
       const margin=(link.width+other.width)/2;
       // Endpoint sides and bend bounds are asserted separately. Compare the
@@ -221,5 +221,42 @@ for(const width of [1200,1800,2800]) test(`source wraps preserve round bends and
       const distance=minDistance(samplePath(link.path,160).filter(outside),samplePath(other.path,160).filter(outside));
       assert.ok(distance+.3>=margin,'Source wrap must clear '+other.source.name+' → '+other.target.name);
     }
+  }
+});
+
+function rightwardMixedSourceGraph(separateTarget=false) {
+  const nodes=[['origin',0,0],['early-top',1,-1,'top'],['early-bottom',1,-2,'bottom'],
+    ['upper',3,-1],['middle',3,-2],['lower',3,-3],['sink',4,0]]
+    .map(([name,horizontalSort,verticalSort,circularLinkType])=>({name,horizontalSort,verticalSort,circularLinkType}));
+  const links=[['origin','early-top',90],['early-top','early-bottom',70],
+    ['early-bottom','upper',30],['early-bottom','middle',20],['early-bottom','lower',25],
+    ['upper','sink',20],['middle','sink',15],['lower','sink',18],
+    ['upper','early-top',9],['lower','early-top',11],
+    ['upper','early-bottom',8],['middle','early-bottom',6],['lower','early-bottom',7]]
+    .map(([source,target,value])=>({source,target,value}));
+  if(separateTarget) {
+    nodes.push({name:'alternate',horizontalSort:2,verticalSort:-1,circularLinkType:'bottom'});
+    links.find(l=>l.source==='middle'&&l.target==='early-bottom').target='alternate';
+    links.push({source:'origin',target:'alternate',value:19});
+  }
+  return {nodes,links};
+}
+for(const separateTarget of [false,true])
+for(const width of [1200,1800,2800]) test(`upward returns bypass earlier source nodes on the right: ${width}, separate target ${separateTarget}`,()=>{
+  const chart=make(rightwardMixedSourceGraph(separateTarget),{width,height:1000,scale:.45});
+  const link=chart.graph.links.find(l=>l.source.name==='lower'&&l.target.name==='early-top');
+  assert.equal(link.circularLinkType,'top');
+  const c=link.circularPathData,points=samplePath(link.path,120);
+  const shelf=points.findIndex(p=>Math.abs(p[1]-c.verticalFullExtent)<1e-5);
+  assert.ok(shelf>0);
+  assert.ok(points.slice(0,shelf).every(p=>p[0]>=link.source.x1-1e-5),
+    'The upward departure must remain on the right of earlier source nodes');
+  const circular=chart.graph.links.filter(l=>l.circular&&!l.isVirtual);
+  for(let i=0;i<circular.length;i++) for(let j=i+1;j<circular.length;j++) {
+    const a=circular[i],b=circular[j],margin=(a.width+b.width)/2;
+    const endpoints=[a.source,a.target,b.source,b.target];
+    const outside=p=>endpoints.every(n=>p[0]<n.x0-margin||p[0]>n.x1+margin||p[1]<n.y0-margin||p[1]>n.y1+margin);
+    assert.ok(minDistance(samplePath(a.path,100).filter(outside),samplePath(b.path,100).filter(outside))+.3>=margin,
+      'Reassigning source corridors must preserve neighboring return clearance: '+a.source.name+' / '+b.source.name);
   }
 });
