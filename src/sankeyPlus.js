@@ -3045,6 +3045,36 @@ class SankeyChart {
       });
     }
 
+    // Leave a small corridor above sources that must reach the preceding
+    // side of their column. These returns still depart on the right.
+    if (this.config.nodes.circularSourceOrdering) {
+      var wrapColumns=new Map();
+      this.graph.nodes.filter(n=>!n.virtual).forEach(function(node) {
+        if (!wrapColumns.has(node.column)) wrapColumns.set(node.column,[]);
+        wrapColumns.get(node.column).push(node);
+      });
+      var wrapGap=this.config.links.circularGap,wrapBase=this.config.links.baseRadius;
+      wrapColumns.forEach(function(nodes) {
+        nodes.sort((a,b)=>a.y0-b.y0);
+        for(var i=1;i<nodes.length;i++) {
+          var node=nodes[i];
+          var top=node.sourceLinks.filter(l=>l.circular&&!l.isVirtual&&l.source.column>l.target.column&&l.circularLinkType==="top");
+          if (!top.length) continue;
+          var room=node._mirrorTopSource&&!node._insetTopSource ?
+            top.reduce((sum,l)=>sum+(l.width||0)+wrapGap,0)+2*wrapBase+wrapGap : 0;
+          node.targetLinks.forEach(function(incoming) {
+            if (!incoming.circular || incoming.isVirtual || incoming.source!==nodes[i-1]) return;
+            var localFrames=incoming.source.sourceLinks.filter(l=>l.circular&&!l.isVirtual&&
+              l.source===l.target&&l.circularLinkType==="bottom").reduce((sum,l)=>sum+(l.width||0),0);
+            if(!node._mirrorTopSource||node._insetTopSource)
+              room=Math.max(room,(incoming.width||0)+localFrames+2*wrapBase+3*wrapGap);
+          });
+          var missing=room-(node.y0-nodes[i-1].y1);
+          if (missing>0) nodes.slice(i).forEach(function(later) {later.y0+=missing;later.y1+=missing;});
+        }
+      });
+    }
+
     // After clamping columns back into bounds, re-assign link ports using the SAME custom
     // circular-aware ordering. `computeLinkBreadths()` sorts circular ports in a single
     // bottom-stacked band and can re-introduce wrong entry ordering/braiding.

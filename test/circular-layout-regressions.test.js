@@ -41,7 +41,7 @@ function graph(kind = 'shared-target') {
 }
 function make(data, options = {}) {
   const chart = new SankeyChart({
-    id: n => n.name, align: 'left', width: options.width ?? 1600, height: 800,
+    id: n => n.name, align: 'left', width: options.width ?? 1600, height: options.height ?? 800,
     padding: 40, scale: options.scale ?? 0.4, iterations: 10,
     nodes: {
       data: structuredClone(data.nodes), width: 15, padding: 25, minPadding: 30,
@@ -128,7 +128,7 @@ for (const kind of ['shared-target', 'local-loops', 'interleaved', 'mixed-source
         if (!link.circular || link.source.column <= link.target.column) continue;
         const c = link.circularPathData;
         const start = link.path.match(/^M([-+\d.e]+)[ ,]([-+\d.e]+)/i);
-        close(Number(start[1]), c.mirroredSourceRadius ? link.source.x0 : link.source.x1);
+        close(Number(start[1]), link.source.x1);
         close(Number(start[2]), c.sourceY);
         const sign = link.circularLinkType === 'top' ? 1 : -1;
         assert.ok(sign * (c.targetY - c.leftSmallArcRadius * sign - c.verticalLeftInnerExtent) >= -1e-5,
@@ -155,4 +155,71 @@ for (const width of [1200, 1800, 2800]) test(`shared synthetic target turns pres
   assert.ok(ac.leftFullExtent - bc.leftFullExtent >= margin - 1e-5);
   assert.ok(ac.verticalFullExtent - bc.verticalFullExtent >= margin - 1e-5);
   close(ac.verticalLeftInnerExtent, bc.verticalLeftInnerExtent, 'Nested shelf bends must keep a common center');
+});
+
+function portBridgeGraph() {
+  const nodes = [
+    ['origin', 0, 0], ['target-top', 1, 0, 'top'], ['target-bottom', 2, 0, 'bottom'],
+    ['upper', 3, -1], ['lower', 3, -2], ['sink', 4, 0]
+  ].map(([name, horizontalSort, verticalSort, circularLinkType]) =>
+    ({name, horizontalSort, verticalSort, circularLinkType}));
+  const links = [
+    ['origin', 'target-top', 80], ['target-top', 'target-bottom', 60],
+    ['target-bottom', 'upper', 40], ['upper', 'lower', 30],
+    ['upper', 'sink', 20], ['lower', 'sink', 20],
+    ['upper', 'target-top', 12], ['lower', 'target-top', 8],
+    ['upper', 'target-bottom', 5], ['lower', 'target-bottom', 6],
+    ['upper', 'upper', 9], ['lower', 'lower', 7]
+  ].map(([source, target, value]) => ({source, target, value}));
+  return {nodes, links};
+}
+for (const width of [1200, 1800, 2800]) test(`same-column link beside upward returns preserves endpoint sides: ${width}`, () => {
+  const chart = make(portBridgeGraph(), {width, height: 1000, scale: 0.45});
+  const link = chart.graph.links.find(l => l.source.name === 'upper' && l.target.name === 'lower');
+  assert.ok(link.circular, 'Exercise the same-column return corridor');
+  const points = [...link.path.matchAll(/([MLA])([^MLA]*)/g)]
+    .map(p => ({command:p[1],values:p[2].trim().split(/[ ,]+/).map(Number)}));
+  close(points[0].values[0], link.source.x1, 'A separate-node connection must depart from the source right edge');
+  close(points.at(-1).values[0], link.target.x0, 'The connection must enter the target left edge');
+  for(const arc of points.filter(p => p.command === 'A')) {
+    assert.ok(arc.values[0] >= link.width/2+5-1e-5, 'Rounded turns must preserve their inner stroke edge');
+    close(arc.values[0],arc.values[1],'Local turns must remain circular');
+  }
+});
+
+for (const width of [1200,1800,2800]) test(`shared bottom targets never reverse an upward source port: ${width}`, () => {
+  const chart=make(portBridgeGraph(), {width,height:1000,scale:0.45});
+  const topReturns=chart.graph.links.filter(l=>l.circular&&l.source.column>l.target.column&&l.circularLinkType==='top');
+  assert.ok(topReturns.length>=2);
+  for(const link of topReturns) {
+    const x=Number(link.path.match(/^M([-+\d.e]+)/i)[1]);
+    close(x,link.source.x1,'Top returns must leave the right source edge even with shared bottom targets');
+    assert.equal(link.circularPathData.mirroredSourceRadius,undefined);
+  }
+});
+
+const {parsePath,samplePath,minDistance}=require('./helpers/circular-path-geometry.cjs');
+for(const width of [1200,1800,2800]) test(`source wraps preserve round bends and neighboring loop clearance: ${width}`, () => {
+  const chart=make(portBridgeGraph(),{width,height:1000,scale:0.45});
+  const local=chart.graph.links.find(l=>l.source.name==='upper'&&l.target.name==='lower');
+  const wrapped=chart.graph.links.filter(l=>l.circularPathData?.sourcePortWrap);
+  assert.ok(wrapped.length,'Exercise a formerly reversed top departure');
+  for(const link of wrapped) {
+    const c=link.circularPathData,w=c.sourcePortWrap;
+    close(parsePath(link.path)[0].nums[0],link.source.x1);
+    for(const r of [w.departureRadius,w.rightRadius,w.leftRadius,w.shelfRadius])
+      assert.ok(r>=link.width/2+5-1e-5,'Every source wrap must preserve its inner stroke edge');
+    assert.ok(w.y+w.rightRadius<=c.sourceY-w.departureRadius+1e-5,'Right source leg must not reverse');
+    assert.ok(c.verticalFullExtent+w.shelfRadius<=w.y-w.leftRadius+1e-5,'Left source leg must not reverse');
+    for(const other of chart.graph.links.filter(l=>l.circular&&!l.isVirtual&&l!==link)) {
+      const margin=(link.width+other.width)/2;
+      // Endpoint sides and bend bounds are asserted separately. Compare the
+      // external corridors, where round-distance clearance is conservative;
+      // at a butt cap it would incorrectly treat a horizontal port as a disk.
+      const endpoints=[link.source,link.target,other.source,other.target];
+      const outside=p=>endpoints.every(n=>p[0]<n.x0-margin||p[0]>n.x1+margin||p[1]<n.y0-margin||p[1]>n.y1+margin);
+      const distance=minDistance(samplePath(link.path,160).filter(outside),samplePath(other.path,160).filter(outside));
+      assert.ok(distance+.3>=margin,'Source wrap must clear '+other.source.name+' → '+other.target.name);
+    }
+  }
 });

@@ -131,15 +131,19 @@ directions, their vertical order is preserved. Independent destination bundles
 can inset the lower source node horizontally, retaining its right-side exit
 with round local corners. The preceding return lanes and upper departures bound
 the inset; only missing corridor room is added before that column. Shared
-bottom destination bundles remain aligned and use the left source corridor
-where necessary. Upper sources keep their right-side exits and wrap outside
+bottom destination bundles remain aligned. Their upward returns depart from the
+right and take a short rounded turn above their source to reach the preceding
+corridor. This also reserves space beside earlier local loops. Upper sources keep their right-side exits and wrap outside
 inner returns at the shelf and target ports. Enable it to avoid opposite source
 corridors crossing while keeping return lanes compact.
 
-With this repair enabled, downward links within a column use the left corridor
-when their target sends upward returns. Extended upward departures use straight
-stubs with local round corners, keeping departure length independent of corner
-radius and shelf height.
+With this repair enabled, links between separate nodes in one column retain
+right-side source and left-side target ports. When space permits, a downward
+connection crosses the gap above its target, clearing the source's local loops;
+otherwise it retains its full outer loop. Upward departures from the lower
+node keep their lane gaps as the whole bundle moves outside the short bridge.
+Only missing corridor width is added before the following columns, with
+endpoint geometry and enclosing source frames moving together.
 
 With `nodes.circularSourceOrdering` enabled, inter-column return departures use
 `baseRadius + link.width / 2` as the minimum local round radius. The vertical

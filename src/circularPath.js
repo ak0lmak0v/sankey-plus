@@ -6329,35 +6329,57 @@ export function addCircularPathData(
     }
   }
 
-  // A downward connection within one column need not encircle its target.
-  // When that target sends returns upward, use the adjacent left corridor so
-  // its incoming loop cannot trap or cross those outgoing source turns.
-  if (compactFinalBacklinks && graph.nodes.some(function(node) {
-    return node._sourceCorridorReordered || node._mirrorTopSource;
-  })) {
+  // Bridge the space above a lower target. Every connection between two
+  // nodes keeps its conventional right source port and left target port.
+  if (compactFinalBacklinks && compactSourceTurns) {
     graph.links.forEach(function(link) {
       if (!link.circular || link.isVirtual || selfLinking(link,id) ||
-          link.source.column !== link.target.column || !link.circularPathData ||
-          !link.target.sourceLinks.some(function(outgoing) {
-            return outgoing.circular && !outgoing.isVirtual &&
-              outgoing.source.column > outgoing.target.column && outgoing.circularLinkType === "top";
-          })) return;
-      var c = link.circularPathData;
-      var room = c.targetY-c.sourceY;
-      var radius = Math.min(c.leftLargeArcRadius,room/2-(circularLinkGap || 0));
-      if (radius < baseRadius+(link.width || 0)/2) return;
-      c.localDownwardRadius = radius;
-      c.sourceX = link.source.x0;
-      c.leftInnerExtent = c.sourceX-c.leftNodeBuffer;
-      c.rightInnerExtent = c.leftInnerExtent;
-      c.leftFullExtent = c.leftInnerExtent-radius;
-      c.rightFullExtent = c.leftFullExtent;
-      c.leftLargeArcRadius = c.leftSmallArcRadius = radius;
-      c.rightLargeArcRadius = c.rightSmallArcRadius = radius;
-      c.verticalBuffer += c.targetY-c.verticalFullExtent;
-      c.verticalFullExtent = c.targetY;
-      c.verticalRightInnerExtent = c.sourceY+radius;
-      c.verticalLeftInnerExtent = c.targetY-radius;
+          link.source.column!==link.target.column || !link.circularPathData ||
+          (link.target._mirrorTopSource&&!link.target._insetTopSource) ||
+          !link.target.sourceLinks.some(l=>l.circular&&!l.isVirtual&&
+            l.source.column>l.target.column&&l.circularLinkType==="top")) return;
+      var c=link.circularPathData,gap=circularLinkGap||0,half=(link.width||0)/2;
+      var radius=baseRadius+half;
+      var right=link.source.x1+c.rightNodeBuffer+radius;
+      var shelf=Math.max(link.source.y1+half+gap,c.sourceY+2*radius+gap);
+      graph.links.forEach(function(inner) {
+        var ic=inner.circularPathData;
+        if (inner===link || !inner.circular || inner.isVirtual || !ic ||
+            inner.source!==link.source || !selfLinking(inner,id) || inner.circularLinkType!=="bottom") return;
+        var clearance=half+(inner.width||0)/2+gap;
+        right=Math.max(right,ic.rightFullExtent+clearance);
+        shelf=Math.max(shelf,ic.verticalFullExtent+clearance);
+      });
+      var ceiling=Math.min(link.target.y0-half-gap,c.targetY-2*radius-gap);
+      if (shelf>ceiling+1e-6) return;
+      if (graph.nodes.some(node=>node!==link.source&&node!==link.target&&!node.virtual&&
+          node.column===link.source.column&&node.y0-half-gap<shelf&&node.y1+half+gap>shelf)) return;
+      c.localPortBridgeRadius=radius;
+      c.sourceX=link.source.x1;c.targetX=link.target.x0;
+      c.rightFullExtent=right;c.rightInnerExtent=right-radius;
+      c.leftInnerExtent=c.targetX-c.leftNodeBuffer;c.leftFullExtent=c.leftInnerExtent-radius;
+      c.leftLargeArcRadius=c.leftSmallArcRadius=c.rightLargeArcRadius=c.rightSmallArcRadius=radius;
+      c.verticalFullExtent=shelf;c.verticalRightInnerExtent=shelf-radius;c.verticalLeftInnerExtent=shelf+radius;
+      // Lower upward departures wrap outside this short bridge. Move an
+      // entire source bundle together so existing lane gaps stay intact.
+      var shifts=new Map();
+      graph.links.forEach(function(outer) {
+        var oc=outer.circularPathData;
+        if (outer===link || !outer.circular || outer.isVirtual || !oc ||
+            outer.circularLinkType!=="top" || outer.source.column!==link.source.column ||
+            outer.source.column<=outer.target.column || oc.mirroredSourceRadius || oc.sourceY<=c.sourceY) return;
+        var clearance=half+(outer.width||0)/2+gap;
+        if (Math.min(oc.sourceY,shelf)+clearance<Math.max(oc.verticalFullExtent,c.sourceY)) return;
+        shifts.set(outer.source,Math.max(shifts.get(outer.source)||0,right+clearance-oc.rightFullExtent));
+      });
+      graph.links.forEach(function(peer) {
+        var pc=peer.circularPathData,shift=shifts.get(peer.source);
+        if (shift>0 && peer.circular && !peer.isVirtual && pc && peer.circularLinkType==="top" &&
+            peer.source.column>peer.target.column&&!pc.mirroredSourceRadius) {
+          pc.rightFullExtent+=shift;
+          pc.sourceStubExtended=true;
+        }
+      });
     });
   }
 
@@ -6582,7 +6604,7 @@ export function addCircularPathData(
     var cornerGroups = new Map();
     graph.links.forEach(function(link) {
       var c = link.circularPathData;
-      if (!link.circular || link.isVirtual || !c ||
+      if (!link.circular || link.isVirtual || !c || c.localPortBridgeRadius ||
           (link.source.column <= link.target.column && !selfLinking(link,id))) return;
       var mirrored = !!c.mirroredSourceRadius;
       var key = link.source.column+"|"+link.circularLinkType+"|"+mirrored;
@@ -6650,7 +6672,7 @@ export function addCircularPathData(
       });
       var turns=graph.links.filter(function(link) {
         return link.circular && !link.isVirtual && link.circularLinkType===band &&
-          link.circularPathData && !link.circularPathData.localDownwardRadius;
+          link.circularPathData && !link.circularPathData.localDownwardRadius && !link.circularPathData.localPortBridgeRadius;
       }).sort(function(a,b) {
         return b.circularPathData.leftFullExtent-a.circularPathData.leftFullExtent;
       });
@@ -6725,6 +6747,178 @@ export function addCircularPathData(
           c.verticalLeftInnerExtent=c.verticalFullExtent+(bottom?-radiusY:radiusY);
         }
       });
+    });
+  }
+
+  if (compactFinalBacklinks && compactSourceTurns) {
+    var wrappedSources=new Set();
+    graph.links.forEach(function(link) {
+      var c=link.circularPathData;
+      if (!link.circular || link.isVirtual || !c) return;
+      if (c.mirroredSourceRadius) wrappedSources.add(link.source);
+    });
+    wrappedSources.forEach(function(source) {
+      var group=graph.links.filter(l=>l.circular&&!l.isVirtual&&l.source===source&&
+        l.source.column>l.target.column&&l.circularLinkType==="top")
+        .sort((a,b)=>a.circularPathData.sourceY-b.circularPathData.sourceY);
+      var gap=circularLinkGap || 0;
+      var wraps=group.map(function(link,i) {
+        var c=link.circularPathData,half=(link.width||0)/2,r=baseRadius+half;
+        var right=c.mirroredSourceRadius ? source.x1+c.rightNodeBuffer+r : c.rightFullExtent;
+        var left=c.mirroredSourceRadius ? c.mirroredSourceFullExtent : source.x0-c.rightNodeBuffer-r;
+        // The upward source axis must stay outside earlier local loop frames.
+        graph.links.forEach(function(other) {
+          var oc=other.circularPathData;
+          if (!other.circular || other.isVirtual || !oc || other.source.column!==source.column ||
+              !selfLinking(other,id)) return;
+          var ownTop=other.source===source&&other.circularLinkType==="top"&&oc.sourceY<c.sourceY;
+          if(!ownTop&&other.source.y0>=source.y0)return;
+          var clearance=half+(other.width||0)/2+gap;
+          left=Math.min(left,oc.leftFullExtent-clearance);
+          if(ownTop)right=Math.max(right,oc.rightFullExtent+clearance);
+        });
+        return {link:link,c:c,half:half,r:r,right:right,left:left,rightRadius:r,leftRadius:r};
+      });
+      for(var i=1;i<wraps.length;i++) {
+        var a=wraps[i-1],b=wraps[i],clearance=a.half+b.half+gap;
+        b.right=Math.max(b.right,a.right+clearance);
+      }
+      for(var i=wraps.length-2;i>=0;i--) {
+        var a=wraps[i],b=wraps[i+1],clearance=a.half+b.half+gap;
+        a.left=Math.min(a.left,b.left-clearance);
+        a.leftRadius=b.leftRadius+b.left-a.left;
+      }
+      wraps.forEach(function(w,i) {
+        if (i) w.rightRadius=wraps[i-1].rightRadius+w.right-wraps[i-1].right;
+        w.y=Math.min(source.y0-w.half-gap,w.c.sourceY-w.r-w.rightRadius-gap);
+        source.sourceLinks.forEach(function(loop) {
+          var lc=loop.circularPathData;
+          if(loop.circular&&!loop.isVirtual&&lc&&selfLinking(loop,id)&&loop.circularLinkType==="top"&&lc.sourceY<w.c.sourceY)
+            w.y=Math.min(w.y,lc.verticalFullExtent-w.half-(loop.width||0)/2-gap);
+        });
+        if (i) w.y=Math.min(w.y,wraps[i-1].y-w.half-wraps[i-1].half-gap);
+        w.shelfRadius=baseRadius+w.half;
+      });
+      // An incoming full loop encloses this short hook. Extend its right
+      // axis, keeping the small source hook inside rather than crossing it.
+      source.targetLinks.forEach(function(incoming) {
+        var ic=incoming.circularPathData;
+        if(!incoming.circular||incoming.isVirtual||!ic||incoming.source===source||
+            incoming.source.column!==source.column||ic.localPortBridgeRadius) return;
+        var required=ic.rightFullExtent;
+        wraps.forEach(function(w) {required=Math.max(required,w.right+w.half+(incoming.width||0)/2+gap);});
+        var delta=required-ic.rightFullExtent;
+        if(delta>0) {
+          ic.rightFullExtent+=delta;
+          ic.rightDepartureInnerExtent=(ic.rightDepartureInnerExtent||ic.rightInnerExtent)+delta;
+          ic.rightShelfInnerExtent=(ic.rightShelfInnerExtent||ic.rightInnerExtent)+delta;
+        }
+      });
+      // Moving an older downward lane right is safe: its departure lies above
+      // this short source hook. Move the whole source bundle to retain gaps.
+      var shifts=new Map();
+      wraps.forEach(function(w) {
+        graph.links.forEach(function(other) {
+          var oc=other.circularPathData;
+          if (!other.circular || other.isVirtual || !oc || other.source===source ||
+              other.source.column!==source.column || other.circularLinkType!=="bottom" ||
+              oc.sourceY>=w.y || oc.verticalFullExtent<w.c.sourceY) return;
+          var clearance=w.half+(other.width||0)/2+gap;
+          if (oc.rightFullExtent>w.right+clearance || oc.rightFullExtent<source.x1) return;
+          shifts.set(other.source,Math.max(shifts.get(other.source)||0,w.right+clearance-oc.rightFullExtent));
+        });
+      });
+      graph.links.forEach(function(other) {
+        var oc=other.circularPathData,shift=shifts.get(other.source);
+        if (!(shift>0) || !other.circular || other.isVirtual || !oc || other.circularLinkType!=="bottom") return;
+        oc.rightFullExtent+=shift;
+        oc.rightDepartureInnerExtent=(oc.rightDepartureInnerExtent||oc.rightInnerExtent)+shift;
+        oc.rightShelfInnerExtent=(oc.rightShelfInnerExtent||oc.rightInnerExtent)+shift;
+      });
+      wraps.forEach(function(w) {
+        w.c.sourcePortWrap={right:w.right,left:w.left,y:w.y,departureRadius:w.r,
+          rightRadius:w.rightRadius,leftRadius:w.leftRadius,shelfRadius:w.shelfRadius};
+        w.c.sourceX=source.x1;
+        delete w.c.mirroredSourceRadius;
+        delete w.c.mirroredSourceFullExtent;
+        delete w.c.mirroredSourceShelfRadius;
+      });
+    });
+  }
+
+  // Source-side repairs can need a little more room than the initial
+  // column allocation. Reserve only the missing width, moving later columns
+  // and their already allocated endpoint geometry together.
+  if (compactFinalBacklinks && compactSourceTurns) {
+    var bridgeColumns=new Set(graph.links.filter(l=>l.circularPathData&&l.circularPathData.localPortBridgeRadius)
+      .map(l=>l.source.column));
+    function enclosesLaterSource(link,boundary) {
+      return graph.links.some(function(other) {
+        return other!==link && other.circular && other._targetOrderRerouted &&
+          other.source.column>=boundary && other.circularLinkType===link.circularLinkType &&
+          link.target.column<other.target.column && link.source.column<other.source.column &&
+          link.source.column>other.target.column;
+      });
+    }
+    function moveLaterColumns(boundary,shift) {
+      graph.nodes.forEach(function(node) {if(node.column>=boundary){node.x0+=shift;node.x1+=shift;}});
+      graph.links.forEach(function(link) {
+        var c=link.circularPathData;if(!link.circular||!c)return;
+        if(link.source.column>=boundary) {
+          ["sourceX","rightInnerExtent","rightFullExtent","rightDepartureInnerExtent","rightShelfInnerExtent",
+            "_rightFullExtentBase","mirroredSourceFullExtent"].forEach(function(key){if(Number.isFinite(c[key]))c[key]+=shift;});
+          if(c.sourcePortWrap){c.sourcePortWrap.right+=shift;c.sourcePortWrap.left+=shift;}
+        } else if(enclosesLaterSource(link,boundary) && !c.sourcePortWrap) {
+          c.sourceStubExtended=true;
+          c.rightFullExtent+=shift;
+          c.rightDepartureInnerExtent=(c.rightDepartureInnerExtent||c.rightInnerExtent)+shift;
+          c.rightShelfInnerExtent=(c.rightShelfInnerExtent||c.rightInnerExtent)+shift;
+        }
+        if(link.target.column>=boundary)
+          ["targetX","leftInnerExtent","leftFullExtent","leftShelfInnerExtent"].forEach(function(key){if(Number.isFinite(c[key]))c[key]+=shift;});
+      });
+      graph.x1+=shift;
+    }
+    Array.from(bridgeColumns).sort((a,b)=>a-b).forEach(function(column) {
+      var right=-Infinity,left=Infinity,gap=circularLinkGap||0;
+      graph.nodes.forEach(function(node) {if(!node.virtual&&node.column>column)left=Math.min(left,node.x0);});
+      graph.links.forEach(function(link) {
+        var c=link.circularPathData,half=(link.width||0)/2;
+        if (!link.circular || link.isVirtual || !c) return;
+        if (link.source.column===column && !enclosesLaterSource(link,column+1))
+          right=Math.max(right,(c.sourcePortWrap?c.sourcePortWrap.right:c.rightFullExtent)+half);
+        if (link.target.column>column) left=Math.min(left,c.leftFullExtent-half);
+        if (link.source.column>column && c.sourcePortWrap) left=Math.min(left,c.sourcePortWrap.left-half);
+        else if (link.source.column>column && c.mirroredSourceFullExtent)
+          left=Math.min(left,c.mirroredSourceFullExtent-half);
+      });
+      var shift=right+gap-left;
+      if (!(shift>1e-6) || !Number.isFinite(shift)) return;
+      moveLaterColumns(column+1,shift);
+    });
+    // A longer enclosing source axis can lie beside a still later local
+    // loop. Reserve that column separately; only source frames enclosing a
+    // moved departure follow it, so an earlier enclosing axis keeps its order.
+    var localColumns=Array.from(new Set(graph.links.filter(l=>l.circular&&!l.isVirtual&&selfLinking(l,id))
+      .map(l=>l.source.column))).sort((a,b)=>a-b);
+    localColumns.forEach(function(column) {
+      var shift=0;
+      graph.links.forEach(function(link) {
+        var c=link.circularPathData;
+        if(!link.circular||link.isVirtual||!c||!c.sourceStubExtended||c.sourcePortWrap||
+            link.circularLinkType!=="top"||link.source.column>=column)return;
+        var y0=c.verticalFullExtent+c.rightLargeArcRadius,y1=c.sourceY-c.rightSmallArcRadius;
+        graph.links.forEach(function(loop) {
+          var lc=loop.circularPathData;
+          if(!loop.circular||loop.isVirtual||!lc||!selfLinking(loop,id)||loop.source.column!==column)return;
+          var margin=((link.width||0)+(loop.width||0))/2+(circularLinkGap||0);
+          if(Math.min(Math.max(y0,y1),Math.max(lc.sourceY,lc.verticalFullExtent))+margin<
+              Math.max(Math.min(y0,y1),Math.min(lc.sourceY,lc.verticalFullExtent)))return;
+          if(c.rightFullExtent-margin>=lc.rightFullExtent)return;
+          shift=Math.max(shift,c.rightFullExtent+margin-lc.leftFullExtent);
+        });
+      });
+      if(shift>1e-6)moveLaterColumns(column,shift);
     });
   }
 
@@ -7746,13 +7940,37 @@ function circularLinksActuallyCross(link1, link2) {
 function createCircularPathString(link) {
   var pathString = "";
   var local = link.circularPathData;
-  if (local.localDownwardRadius) {
-    var radius = local.localDownwardRadius;
+
+  if (local.localPortBridgeRadius) {
+    var radius=local.localPortBridgeRadius;
     return "M"+local.sourceX+" "+local.sourceY+
-      " L"+local.leftInnerExtent+" "+local.sourceY+
-      " A"+radius+" "+radius+" 0 0 0 "+local.leftFullExtent+" "+(local.sourceY+radius)+
+      " L"+local.rightInnerExtent+" "+local.sourceY+
+      " A"+radius+" "+radius+" 0 0 1 "+local.rightFullExtent+" "+(local.sourceY+radius)+
+      " L"+local.rightFullExtent+" "+(local.verticalFullExtent-radius)+
+      " A"+radius+" "+radius+" 0 0 1 "+local.rightInnerExtent+" "+local.verticalFullExtent+
+      " L"+local.leftInnerExtent+" "+local.verticalFullExtent+
+      " A"+radius+" "+radius+" 0 0 0 "+local.leftFullExtent+" "+(local.verticalFullExtent+radius)+
       " L"+local.leftFullExtent+" "+(local.targetY-radius)+
       " A"+radius+" "+radius+" 0 0 0 "+local.leftInnerExtent+" "+local.targetY+
+      " L"+local.targetX+" "+local.targetY;
+  }
+
+  if (local.sourcePortWrap) {
+    var w=local.sourcePortWrap,r=w.departureRadius;
+    return "M"+local.sourceX+" "+local.sourceY+
+      " L"+(w.right-r)+" "+local.sourceY+
+      " A"+r+" "+r+" 0 0 0 "+w.right+" "+(local.sourceY-r)+
+      " L"+w.right+" "+(w.y+w.rightRadius)+
+      " A"+w.rightRadius+" "+w.rightRadius+" 0 0 0 "+(w.right-w.rightRadius)+" "+w.y+
+      " L"+(w.left+w.leftRadius)+" "+w.y+
+      " A"+w.leftRadius+" "+w.leftRadius+" 0 0 1 "+w.left+" "+(w.y-w.leftRadius)+
+      " L"+w.left+" "+(local.verticalFullExtent+w.shelfRadius)+
+      " A"+w.shelfRadius+" "+w.shelfRadius+" 0 0 0 "+(w.left-w.shelfRadius)+" "+local.verticalFullExtent+
+      " L"+(local.leftShelfInnerExtent||local.leftInnerExtent)+" "+local.verticalFullExtent+
+      " A"+(local.leftShelfArcRadius||local.leftLargeArcRadius)+" "+(local.leftShelfVerticalRadius||local.leftLargeArcRadius)+
+      " 0 0 0 "+local.leftFullExtent+" "+local.verticalLeftInnerExtent+
+      " L"+local.leftFullExtent+" "+(local.targetY-local.leftSmallArcRadius)+
+      " A"+local.leftSmallArcRadius+" "+local.leftSmallArcRadius+" 0 0 0 "+local.leftInnerExtent+" "+local.targetY+
       " L"+local.targetX+" "+local.targetY;
   }
 
