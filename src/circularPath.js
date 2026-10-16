@@ -6472,6 +6472,52 @@ export function addCircularPathData(
           (link.circularLinkType === "top" ? radius : -radius);
       }
     });
+    // A local frame can anchor the outer lane farther from the node. If the
+    // inner departure is below that frame, reuse its empty horizontal slot
+    // by extending only the inner straight stub, keeping both corners round.
+    finalSourceColumns.forEach(function(group) {
+      if (group[0].circularLinkType !== "bottom") return;
+      var ordered=group.slice().sort(function(a,b) {
+        return a.circularPathData.rightFullExtent-b.circularPathData.rightFullExtent;
+      });
+      for(var i=ordered.length-2;i>=0;i--) {
+        var inner=ordered[i],outer=ordered[i+1],c=inner.circularPathData,oc=outer.circularPathData;
+        if(inner.source===outer.source || Math.abs(inner.source.x1-outer.source.x1)>1e-6 ||
+            inner.target.column!==outer.target.column || c.mirroredSourceRadius || oc.mirroredSourceRadius) continue;
+        var y0=c.sourceY,y1=c.verticalFullExtent;
+        if(y1<=y0 || Math.min(y1,oc.verticalFullExtent)<=Math.max(y0,oc.sourceY)) continue;
+        var gap=circularLinkGap || 0,half=(inner.width || 0)/2;
+        var clearance=half+(outer.width || 0)/2+gap;
+        var next=oc.rightFullExtent-clearance;
+        if(next<=c.rightFullExtent+1e-6) continue;
+        var frames=graph.links.filter(function(loop) {
+          return loop.circular && !loop.isVirtual && selfLinking(loop,id) && loop.source===outer.source &&
+            loop.circularLinkType==="bottom" && loop.circularPathData;
+        });
+        if(!frames.length || frames.some(function(loop) {
+          var lc=loop.circularPathData,margin=half+(loop.width || 0)/2+gap;
+          return Math.min(y1,lc.verticalFullExtent)+margin>=Math.max(y0,lc.sourceY);
+        })) continue;
+        graph.nodes.forEach(function(node) {
+          if(node.virtual || node===inner.source || node.x0<c.rightFullExtent ||
+              node.y1+half+gap<y0 || node.y0-half-gap>y1) return;
+          next=Math.min(next,node.x0-half-gap);
+        });
+        graph.links.forEach(function(other) {
+          var dc=other.circularPathData;
+          if(other===inner || !other.circular || other.isVirtual || !dc) return;
+          var margin=half+(other.width || 0)/2+gap;
+          if(dc.rightFullExtent>c.rightFullExtent &&
+              Math.min(y1,Math.max(dc.sourceY,dc.verticalFullExtent))+margin>=
+                Math.max(y0,Math.min(dc.sourceY,dc.verticalFullExtent)))
+            next=Math.min(next,dc.rightFullExtent-margin);
+        });
+        if(next<=c.rightFullExtent+1e-6) continue;
+        c.rightFullExtent=next;
+        c.rightDepartureInnerExtent=next-c.rightSourceLargeArcRadius;
+        c.rightShelfInnerExtent=next-c.rightLargeArcRadius;
+      }
+    });
   }
 
   if (compactFinalBacklinks && compactSourceTurns) {

@@ -368,3 +368,39 @@ for (const width of [1500, 1750, 2700, 4000]) {
     }
   });
 }
+
+function sourceFrameGapGraph() {
+  const nodes = [
+    ['origin', 0, 0], ['upper-target', 1, -1], ['lower-target', 1, -2],
+    ['upper', 3, -1], ['lower', 3, -2], ['sink', 4, 0]
+  ].map(([name, horizontalSort, verticalSort]) => ({name, horizontalSort, verticalSort}));
+  const links = [
+    ['origin', 'upper-target', 100], ['origin', 'lower-target', 45],
+    ['upper-target', 'upper', 65], ['lower-target', 'lower', 30],
+    ['upper', 'sink', 40], ['lower', 'sink', 20],
+    ['upper', 'upper-target', 17], ['lower', 'lower-target', 7], ['upper', 'upper', 11]
+  ].map(([source, target, value]) => ({source, target, value,
+    ...(['upper', 'lower'].includes(source) && ['upper-target', 'lower-target', 'upper'].includes(target)
+      ? {_forceCircularLinkType: 'bottom'} : {})}));
+  return {nodes, links};
+}
+for (const width of [1200, 1500, 2000, 4000])
+test(`disjoint local frame does not leave an empty right source lane at width ${width}`, () => {
+  const chart = make(sourceFrameGapGraph(), {width, height: 1000, scale: 0.45});
+  const links = chart.graph.links.filter(l => l.circular && !l.isVirtual);
+  const inner = links.find(l => l.source.name === 'lower');
+  const outer = links.find(l => l.source.name === 'upper' && l.target.name === 'upper-target');
+  const loop = links.find(l => l.source === l.target);
+  assert.ok(inner.circularPathData.sourceY > loop.circularPathData.verticalFullExtent +
+    (inner.width + loop.width) / 2, 'This local frame must not occupy the inner departure corridor');
+  const gap = outer.circularPathData.rightFullExtent - inner.circularPathData.rightFullExtent -
+    (inner.width + outer.width) / 2;
+  close(gap, chart.config.links.circularGap, 'Reuse the unoccupied source lane beside the outer frame');
+  for (const link of links) {
+    assertRoundRoute(link);
+    for (const other of links.filter(l => l !== link)) {
+      assert.ok(minDistance(samplePath(link.path, 220), samplePath(other.path, 220)) + 0.3 >=
+        (link.width + other.width) / 2, 'Compaction must preserve complete route and self-loop clearance');
+    }
+  }
+});
