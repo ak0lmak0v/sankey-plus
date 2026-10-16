@@ -6524,7 +6524,7 @@ export function addCircularPathData(
     // Mirroring replaces the old right-side turn with a shorter left-side
     // departure. Release its obsolete shelf padding against final geometry,
     // while retaining the established inner-to-outer corridor order.
-    function finalTopShelf(link) {
+    function finalShelf(link) {
       var c=link.circularPathData;
       var source=c.mirroredSourceRadius ? c.mirroredSourceFullExtent-
         (c.mirroredSourceShelfRadius || c.mirroredSourceRadius) :
@@ -6533,17 +6533,21 @@ export function addCircularPathData(
     }
     // Port reordering can leave unoccupied turn slots in a target bundle.
     // Repack both the target radii and their shelves against final geometry;
-    // moving shelves alone leaves mismatched nested bend centers.
-    var topTargets=new Map();
+    // moving shelves alone leaves mismatched nested bend centers. Bottom
+    // arrivals also share their physical column across stacked target nodes.
+    var targetCorridors=new Map();
     graph.links.forEach(function(link) {
-      if (!link.circular || link.isVirtual || link.circularLinkType!=="top" ||
+      if (!link.circular || link.isVirtual ||
           !link.circularPathData || link.source.column<=link.target.column) return;
-      if (!topTargets.has(link.target)) topTargets.set(link.target,[]);
-      topTargets.get(link.target).push(link);
+      var key=link.circularLinkType==="bottom" ? "bottom|"+link.target.column+"|"+link.target.x0 : link.target;
+      if (!targetCorridors.has(key)) targetCorridors.set(key,[]);
+      targetCorridors.get(key).push(link);
     });
-    topTargets.forEach(function(bundle) {
+    targetCorridors.forEach(function(bundle) {
       if (bundle.length<2) return;
-      bundle.sort(function(a,b) { return a.circularPathData.targetY-b.circularPathData.targetY; });
+      var bottom=bundle[0].circularLinkType==="bottom",sign=bottom?1:-1;
+      var outward=bottom?Math.max:Math.min;
+      bundle.sort(function(a,b) { return sign*(b.circularPathData.targetY-a.circularPathData.targetY); });
       bundle.forEach(function(link,i) {
         if (!i) return;
         var c=link.circularPathData,previous=bundle[i-1],pc=previous.circularPathData;
@@ -6563,38 +6567,38 @@ export function addCircularPathData(
         });
         radius=Math.min(c.leftLargeArcRadius,radius);
         var shrink=c.leftLargeArcRadius-radius;
-        var small=Math.min(c.leftSmallArcRadius,
+        var small=bottom ? Math.min(c.leftSmallArcRadius,radius) : Math.min(c.leftSmallArcRadius,
           Math.max(baseRadius+half,c.leftSmallArcRadius-shrink));
         var departure=c.mirroredSourceRadius || c.rightSmallArcRadius;
         var sourceCorner=c.mirroredSourceRadius ? (c.mirroredSourceShelfRadius || departure) : c.rightLargeArcRadius;
-        var ceiling=Math.min(c.sourceY-departure-sourceCorner-gap,c.targetY-small-radius-gap,
-          pc.verticalFullExtent-Math.max(clearance,radius-pc.leftLargeArcRadius));
-        var shelf=finalTopShelf(link);
+        var bound=outward(c.sourceY+sign*(departure+sourceCorner+gap),c.targetY+sign*(small+radius+gap),
+          pc.verticalFullExtent+sign*Math.max(clearance,radius-pc.leftLargeArcRadius));
+        var shelf=finalShelf(link);
         graph.nodes.forEach(function(node) {
           if (node.virtual || node===link.source || node===link.target ||
               node.x1<=shelf.x0 || node.x0>=shelf.x1) return;
-          ceiling=Math.min(ceiling,node.y0-half-gap);
+          bound=outward(bound,(bottom?node.y1:node.y0)+sign*(half+gap));
         });
         graph.links.forEach(function(other) {
           var oc=other.circularPathData;
           if (bundle.includes(other) || !other.circular || other.isVirtual ||
-              other.circularLinkType!=="top" || !oc || oc.localDownwardRadius ||
-              oc.verticalFullExtent<=c.verticalFullExtent+1e-6) return;
-          var os=finalTopShelf(other);
+              other.circularLinkType!==link.circularLinkType || !oc || oc.localDownwardRadius ||
+              (bottom?oc.verticalFullExtent>=c.verticalFullExtent-1e-6:oc.verticalFullExtent<=c.verticalFullExtent+1e-6)) return;
+          var os=finalShelf(other);
           if (os.x1<=shelf.x0 || os.x0>=shelf.x1) return;
           var margin=half+(other.width || 0)/2+gap;
           if (!selfLinking(other,id) && other.target.column===link.target.column &&
               c.leftFullExtent<oc.leftFullExtent) margin=Math.max(margin,radius-oc.leftLargeArcRadius);
-          ceiling=Math.min(ceiling,oc.verticalFullExtent-margin);
+          bound=outward(bound,oc.verticalFullExtent+sign*margin);
         });
-        var nextVfe=Math.max(c.verticalFullExtent,ceiling);
-        c.verticalBuffer-=nextVfe-c.verticalFullExtent;
+        var nextVfe=bottom?Math.min(c.verticalFullExtent,bound):Math.max(c.verticalFullExtent,bound);
+        c.verticalBuffer+=sign*(nextVfe-c.verticalFullExtent);
         c.leftLargeArcRadius=radius;
         c.leftSmallArcRadius=small;
         c.leftFullExtent=c.leftInnerExtent-radius;
         c.verticalFullExtent=nextVfe;
-        c.verticalLeftInnerExtent=nextVfe+radius;
-        c.verticalRightInnerExtent=nextVfe+sourceCorner;
+        c.verticalLeftInnerExtent=nextVfe-sign*radius;
+        c.verticalRightInnerExtent=nextVfe-sign*sourceCorner;
       });
     });
     graph.links.filter(function(link) {
@@ -6607,7 +6611,7 @@ export function addCircularPathData(
       var radius=c.mirroredSourceRadius;
       var ceiling=Math.min(c.sourceY-radius-(c.mirroredSourceShelfRadius || radius)-gap,
         c.targetY-c.leftSmallArcRadius-c.leftLargeArcRadius-gap);
-      var shelf=finalTopShelf(link);
+      var shelf=finalShelf(link);
       graph.nodes.forEach(function(node) {
         if (node.virtual || node===link.source || node===link.target ||
             node.x1<=shelf.x0 || node.x0>=shelf.x1) return;
@@ -6618,7 +6622,7 @@ export function addCircularPathData(
         if (inner===link || !inner.circular || inner.isVirtual ||
             inner.circularLinkType!=="top" || !ic || ic.localDownwardRadius ||
             ic.verticalFullExtent<=oldVfe+1e-6) return;
-        var innerShelf=finalTopShelf(inner);
+        var innerShelf=finalShelf(inner);
         if (innerShelf.x1<=shelf.x0 || innerShelf.x0>=shelf.x1) return;
         var clearance=((link.width || 0)+(inner.width || 0))/2+gap;
         if (!selfLinking(inner,id) && inner.target.column===link.target.column &&
@@ -6638,7 +6642,7 @@ export function addCircularPathData(
       })) return;
       var shift=ceiling-oldVfe;
       bundle.forEach(function(peer) {
-        var pc=peer.circularPathData,peerShelf=finalTopShelf(peer);
+        var pc=peer.circularPathData,peerShelf=finalShelf(peer);
         var departure=pc.mirroredSourceRadius || pc.rightSmallArcRadius;
         var corner=pc.mirroredSourceRadius ? (pc.mirroredSourceShelfRadius || departure) : pc.rightLargeArcRadius;
         var limit=Math.min(pc.sourceY-departure-corner-gap,
@@ -6653,7 +6657,7 @@ export function addCircularPathData(
           if (bundle.includes(other) || !other.circular || other.isVirtual ||
               other.circularLinkType!=="top" || !oc || oc.localDownwardRadius ||
               oc.verticalFullExtent<=pc.verticalFullExtent+1e-6) return;
-          var otherShelf=finalTopShelf(other);
+          var otherShelf=finalShelf(other);
           if (otherShelf.x1<=peerShelf.x0 || otherShelf.x0>=peerShelf.x1) return;
           var clearance=((peer.width || 0)+(other.width || 0))/2+gap;
           if (!selfLinking(other,id) && other.target.column===peer.target.column &&

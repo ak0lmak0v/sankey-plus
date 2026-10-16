@@ -404,3 +404,56 @@ test(`disjoint local frame does not leave an empty right source lane at width ${
     }
   }
 });
+
+function bottomShelfSlotsGraph() {
+  // Minimized synthetic topology: removing any edge loses the obsolete-slot
+  // regression or its clear bottom-corridor geometry.
+  const {nodes} = overlappingTargetFamilies();
+  const links = [
+    ['origin', 'lower-target', 33], ['upper-target', 'step', 26],
+    ['early', 'middle', 25], ['peer', 'middle', 10], ['late', 'sink', 15],
+    ['early', 'upper-target', 4], ['peer', 'upper-target', 7],
+    ['middle', 'upper-target', 8], ['late', 'lower-target', 32],
+    ['early', 'origin', 37], ['peer', 'origin', 22]
+  ].map(([source, target, value]) => ({source, target, value,
+    ...(['upper-target', 'lower-target', 'origin'].includes(target)
+      ? {_forceCircularLinkType: target === 'origin' ? 'top' : 'bottom'} : {})}));
+  return {nodes, links};
+}
+
+for (const width of [1500, 2000, 2700, 4000])
+test(`bottom target turns release vacant shelf slots at width ${width}`, () => {
+  const chart = make(bottomShelfSlotsGraph(), {width, height: 1000, scale: 0.45});
+  const links = chart.graph.links.filter(l => l.circular && !l.isVirtual && l.circularLinkType === 'bottom');
+  const bundle = links.filter(l => l.target.name === 'upper-target')
+    .sort((a, b) => a.circularPathData.verticalFullExtent - b.circularPathData.verticalFullExtent);
+  assert.equal(bundle.length, 3);
+  for (let i = 1; i < bundle.length; i++) {
+    const a = bundle[i - 1], b = bundle[i];
+    const gap = b.circularPathData.verticalFullExtent - a.circularPathData.verticalFullExtent - (a.width + b.width) / 2;
+    close(gap, chart.config.links.circularGap, 'An obsolete target turn slot must not reserve an empty shelf lane');
+  }
+  const corridor = links.slice().sort((a, b) =>
+    a.circularPathData.verticalFullExtent - b.circularPathData.verticalFullExtent);
+  let boundaries = 0;
+  for (let i = 1; i < corridor.length; i++) {
+    const a = corridor[i - 1], b = corridor[i];
+    if (a.target === b.target) continue;
+    boundaries++;
+    close(b.circularPathData.verticalFullExtent - a.circularPathData.verticalFullExtent -
+      (a.width + b.width) / 2, chart.config.links.circularGap,
+      'A target-node boundary must not retain a vacant turn slot');
+  }
+  assert.ok(boundaries > 0, 'Exercise stacked target-node bundles in a shared corridor');
+  for (const link of links) {
+    assertRoundRoute(link);
+    for (const node of chart.graph.nodes.filter(n => !n.virtual && n !== link.source && n !== link.target)) {
+      const clearance = Math.min(...samplePath(link.path, 220).map(([x, y]) => Math.hypot(
+        Math.max(node.x0 - x, 0, x - node.x1), Math.max(node.y0 - y, 0, y - node.y1))));
+      assert.ok(clearance + 0.3 >= link.width / 2, 'Compacted bottom routes must retain node-body clearance');
+    }
+    for (const other of links.filter(l => l !== link))
+      assert.ok(minDistance(samplePath(link.path, 220), samplePath(other.path, 220)) + 0.3 >=
+        (link.width + other.width) / 2, 'Compacted target corners and complete bottom routes must retain clearance');
+  }
+});
