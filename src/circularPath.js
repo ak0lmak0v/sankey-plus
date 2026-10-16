@@ -6461,6 +6461,10 @@ export function addCircularPathData(
         c.mirroredSourceFullExtent = link.source.x0-c.rightNodeBuffer-c.mirroredSourceRadius;
         c.mirroredSourceRadius = radius;
       } else {
+        if (Number.isFinite(link._returnSourceAxis)) {
+          c.rightFullExtent = Math.max(c.rightFullExtent, link._returnSourceAxis);
+          c.sourceStubExtended = true;
+        }
         c.rightLargeArcRadius = c.rightSmallArcRadius = c.rightSourceLargeArcRadius = radius;
         c.rightDepartureInnerExtent = c.rightFullExtent-radius;
         c.rightShelfInnerExtent = c.rightFullExtent-radius;
@@ -6875,9 +6879,15 @@ export function addCircularPathData(
   // column allocation. Reserve only the missing width, moving later columns
   // and their already allocated endpoint geometry together.
   if (compactFinalBacklinks && compactSourceTurns) {
-    var bridgeColumns=new Set(graph.links.filter(l=>l.circularPathData&&(l.circularPathData.localPortBridgeRadius||l.source._staggeredReturnSource))
+    var bridgeColumns=new Set(graph.links.filter(l=>l.circularPathData&&(l.circularPathData.localPortBridgeRadius||l.source._staggeredReturnSource||Number.isFinite(l._returnSourceAxis)))
       .map(l=>l.source.column));
     function enclosesLaterSource(link,boundary) {
+      if (Number.isFinite(link._returnSourceAxis) && graph.links.some(function(other) {
+        return other !== link && other.circular && !other.isVirtual &&
+          other.circularLinkType === link.circularLinkType &&
+          other.source.column >= boundary && other.source.column > link.source.column &&
+          other.target.column === link.target.column && other.y1 > link.y1;
+      })) return true;
       return graph.links.some(function(other) {
         return other!==link && other.circular && other._targetOrderRerouted &&
           other.source.column>=boundary && other.circularLinkType===link.circularLinkType &&
@@ -6931,8 +6941,10 @@ export function addCircularPathData(
       graph.links.forEach(function(link) {
         var c=link.circularPathData;
         if(!link.circular||link.isVirtual||!c||!c.sourceStubExtended||c.sourcePortWrap||
-            link.circularLinkType!=="top"||link.source.column>=column)return;
-        var y0=c.verticalFullExtent+c.rightLargeArcRadius,y1=c.sourceY-c.rightSmallArcRadius;
+            link.source.column>=column)return;
+        var bottom=link.circularLinkType==="bottom";
+        var y0=c.verticalFullExtent+(bottom?-c.rightLargeArcRadius:c.rightLargeArcRadius);
+        var y1=c.sourceY+(bottom?c.rightSmallArcRadius:-c.rightSmallArcRadius);
         graph.links.forEach(function(loop) {
           var lc=loop.circularPathData;
           if(!loop.circular||loop.isVirtual||!lc||!selfLinking(loop,id)||loop.source.column!==column)return;

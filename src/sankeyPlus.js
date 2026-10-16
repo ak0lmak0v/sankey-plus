@@ -1,3 +1,4 @@
+import {prepareReturnSourceCorridors} from "./returnSourceCorridors.js";
 import { find } from "./find.js";
 //import { constant } from './constant.js';
 import {group, groups, sum, mean, min, max, select, range, scaleLinear, linkHorizontal} from "d3";
@@ -3159,6 +3160,10 @@ class SankeyChart {
     );
     _captureBacklinkStage("after/sortTargetLinks#final");
     this.graph = straigtenVirtualNodes(this.graph);
+    if (this.config.nodes.circularSourceOrdering) {
+      prepareReturnSourceCorridors(this.graph, this.config.links.circularGap, this.config.links.baseRadius);
+    }
+
 
     this.graph = addCircularPathData(
       this.graph,

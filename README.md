@@ -198,3 +198,9 @@ Historical suites depending on demo HTML/JSON files are retained and can be
 run with `npm run test:legacy` when those fixtures are available locally.
 Those fixtures are not included in this repository or required by CI. Do not
 add customer reports or production event datasets as public test fixtures.
+
+Source corridor ordering also follows bottom target ports across source columns.
+An outer return may use a longer straight departure to enclose a later inner
+return. The layout coordinates source node positions with those departures,
+including neighboring node bodies and self-loop frames. These adjustments keep
+local corners round and preserve link thickness; they do not change return bands.

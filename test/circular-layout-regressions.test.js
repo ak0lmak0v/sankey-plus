@@ -299,3 +299,72 @@ test(`both return bands keep their departure beside the source right edge: ${wid
    link.source.name+' → '+link.target.name+' must not turn back through its source column before reaching its shelf');
  }
 });
+
+// Overlapping source ranges for two stacked targets. The extra returns to
+// origin exercise mixed source ordering without using production graph data.
+function overlappingTargetFamilies(withSelfLoop = false) {
+  const nodes = [
+    ['origin', 0, 0], ['upper-target', 1, -1, 'bottom'],
+    ['lower-target', 1, -2, 'bottom'], ['step', 2, 0],
+    ['early', 3, -1], ['peer', 3, -2], ['middle', 4, 0],
+    ['late', 5, 0], ['sink', 6, 0]
+  ].map(([name, horizontalSort, verticalSort, circularLinkType]) =>
+    ({name, horizontalSort, verticalSort, circularLinkType}));
+  const links = [
+    ['origin', 'upper-target', 100], ['origin', 'lower-target', 50],
+    ['upper-target', 'step', 70], ['lower-target', 'step', 40],
+    ['step', 'early', 55], ['step', 'peer', 35],
+    ['early', 'middle', 35], ['peer', 'middle', 25],
+    ['middle', 'late', 40], ['late', 'sink', 20],
+    ['early', 'upper-target', 17], ['peer', 'upper-target', 9],
+    ['middle', 'upper-target', 19], ['late', 'lower-target', 7],
+    ['early', 'lower-target', 5], ['early', 'origin', 6],
+    ['peer', 'origin', 8]
+  ].map(([source, target, value]) => ({source, target, value}));
+  if (withSelfLoop) {
+    // Hold corridor choice fixed to isolate source/frame clearance from the
+    // separate route-cost optimizer as the local self-loop load changes.
+    links.filter(l => ['upper-target', 'lower-target', 'origin'].includes(l.target))
+      .forEach(l => { l._forceCircularLinkType = l.target === 'origin' ? 'top' : 'bottom'; });
+    links.push({source: 'peer', target: 'peer', value: 3});
+  }
+  return {nodes, links};
+}
+for (const withSelfLoop of [false, true])
+for (const width of [1500, 1750, 2700, 4000]) {
+  test(`overlapping target families retain complete return clearance at width ${width}, self-loop ${withSelfLoop}`, () => {
+    const chart = make(overlappingTargetFamilies(withSelfLoop), {width, height: 1000, scale: 0.45});
+    const returns = chart.graph.links.filter(l => l.circular && !l.isVirtual);
+    for (const link of returns) {
+      assertRoundRoute(link);
+      for (const node of chart.graph.nodes.filter(n => !n.virtual && n !== link.source && n !== link.target)) {
+        const clearance = Math.min(...samplePath(link.path, 220).map(([x, y]) => Math.hypot(
+          Math.max(node.x0 - x, 0, x - node.x1), Math.max(node.y0 - y, 0, y - node.y1))));
+        assert.ok(clearance + 0.3 >= link.width / 2,
+          `${link.source.name} → ${link.target.name} cuts through ${node.name}`);
+      }
+    }
+    for (let i = 0; i < returns.length; i++) {
+      for (const other of returns.slice(i + 1)) {
+        const link = returns[i], margin = (link.width + other.width) / 2;
+        // No endpoint masks: inspect the complete paths, including target
+        // turns and source stubs where a corridor repair can move a collision.
+        assert.ok(minDistance(samplePath(link.path, 220), samplePath(other.path, 220)) + 0.3 >= margin,
+          `${link.source.name} → ${link.target.name} crosses ${other.source.name} → ${other.target.name}`);
+      }
+    }
+  });
+  test(`overlapping target families do not leave vacant target lanes at width ${width}, self-loop ${withSelfLoop}`, () => {
+    const chart = make(overlappingTargetFamilies(withSelfLoop), {width, height: 1000, scale: 0.45});
+    const bundle = chart.graph.links.filter(l => l.circular && !l.isVirtual && l.target.name === 'upper-target')
+      .sort((a, b) => a.circularPathData.targetY - b.circularPathData.targetY);
+    assert.equal(new Set(bundle.map(l => l.circularLinkType)).size, 1,
+      'Keep the target family together when resolving conflicting source intervals');
+    for (let i = 1; i < bundle.length; i++) {
+      const a = bundle[i - 1], b = bundle[i];
+      const gap = Math.abs(a.circularPathData.verticalFullExtent - b.circularPathData.verticalFullExtent) -
+        (a.width + b.width) / 2;
+      close(gap, chart.config.links.circularGap, 'Adjacent shelves must have only the configured gap');
+    }
+  });
+}
