@@ -310,3 +310,46 @@ test('commented percentage hides when an unrelated node is selected and returns 
   assert.equal(percent.style.opacity, '1', 'Opening the comment restores its text and link emphasis');
   assert.equal(percent.parentElement.style.opacity, '1');
 });
+
+for (const kind of ['forward', 'return', 'self'])
+  test(kind + ' link paints exactly one percentage when another endpoint has a comment', t => {
+    const {doc, chart, click, annotate, poll} = fixture(t, true);
+    const link = chart.graph.links.find(l => kind === 'self' ? l.source === l.target :
+      kind === 'return' ? l.source.name === 'sink' : l.source.name === 'origin');
+    const anchor = doc.getElementById(`chart-link-${link.index}-${kind === 'self' ? 'self' : 'target'}-percent`);
+    const group = anchor.parentElement;
+    const painted = () => [...group.querySelectorAll('text')].filter(e => e.style.opacity === '1' && group.style.opacity === '1');
+    const context = doc.body.textContent, textNode = anchor.firstChild;
+    annotate(anchor); poll();
+    click([...doc.querySelectorAll('.sankey-link')].find(e => e.__data__ === link));
+    assert.equal(painted().length, 1, 'A comment must replace the usual endpoint label, not add a duplicate');
+    for (const node of new Set([link.source, link.target])) {
+      click(doc.getElementById(`chart-node-label-${encodeURIComponent(node.name)}`).parentElement.querySelector('rect'));
+      assert.equal(painted().length, 1);
+      assert.equal(painted()[0], anchor, 'Keep the existing annotation at its original text anchor');
+    }
+    assert.equal(anchor.firstChild, textNode);
+    assert.equal(doc.body.textContent, context);
+  });
+
+test('multiple endpoint comments paint only the active quote without moving or deleting either anchor', t => {
+  const {doc, chart, click, registry, poll} = fixture(t, true);
+  const link = chart.graph.links.find(l => l.source.name === 'sink');
+  const source = doc.getElementById(`chart-link-${link.index}-source-percent`);
+  const target = doc.getElementById(`chart-link-${link.index}-target-percent`);
+  const rangeFor = element => { const r = doc.createRange(); r.selectNodeContents(element); return r; };
+  const sr = rangeFor(source), tr = rangeFor(target);
+  const originalNodes = [source.firstChild, target.firstChild];
+  const painted = () => [...source.parentElement.querySelectorAll('text')].filter(e => e.style.opacity === '1');
+  registry.set('display-comment-anchor', new Set([sr, tr])); poll();
+  click([...doc.querySelectorAll('.sankey-link')].find(e => e.__data__ === link));
+  assert.equal(painted().length, 1);
+  registry.set('display-comment-anchor', new Set([sr]));
+  registry.set('display-comment-anchor-focused-open', new Set([tr])); poll();
+  assert.deepEqual(painted(), [target]);
+  registry.set('display-comment-anchor', new Set([tr]));
+  registry.set('display-comment-anchor-focused-open', new Set([sr])); poll();
+  assert.deepEqual(painted(), [source]);
+  assert.deepEqual([source.firstChild, target.firstChild], originalNodes);
+  assert.ok(sr.startContainer.isConnected && tr.startContainer.isConnected);
+});

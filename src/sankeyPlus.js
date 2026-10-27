@@ -3257,6 +3257,7 @@ class SankeyChart {
       .style("-webkit-user-select", "text");
 
     let commentedAnchors = new Set();
+    let focusedCommentAnchor = null;
     let commentHighlights = {refresh() {}, dispose() {}};
     let commentFocusOwned = false;
     const visibleLinks = new Set();
@@ -3268,12 +3269,19 @@ class SankeyChart {
     };
     const refreshLabelPaint = () => {
       linkLabels.each(function(d) {
-        let painted = false;
-        select(this).selectAll("text").each(function() {
-          const visible = visibleLinks.has(d) && (labelModes.get(this) || commentedAnchors.has(this));
+        const texts = select(this).selectAll("text");
+        const anchors = texts.nodes().filter(text => text.textContent.trim());
+        const annotated = anchors.filter(text => commentedAnchors.has(text));
+        // One value per link. Prefer its existing quote so the host's comment
+        // remains clickable, replacing (rather than adding to) the hover label.
+        const preferred = annotated.includes(focusedCommentAnchor) ? focusedCommentAnchor
+          : annotated.find(text => labelModes.get(text)) || annotated[0]
+          || anchors.find(text => labelModes.get(text));
+        const painted = visibleLinks.has(d) && !!preferred;
+        texts.each(function() {
+          const visible = painted && this === preferred;
           this.style.opacity = visible ? "1" : "0";
           this.style.pointerEvents = visible ? "visiblePainted" : "none";
-          painted ||= !!visible;
         });
         this.style.opacity = painted ? "1" : "0";
       });
@@ -4048,6 +4056,7 @@ class SankeyChart {
       });
     commentHighlights = displayCommentHighlights(svg.node(), ({annotated, focused, focusChanged}) => {
       commentedAnchors = annotated;
+      focusedCommentAnchor = focused;
       g.selectAll(".sankey-comment-anchor")
         .classed("sankey-commented", function() { return annotated.has(this); });
       if (focusChanged) {
