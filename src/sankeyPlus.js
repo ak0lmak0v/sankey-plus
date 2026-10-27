@@ -1,3 +1,4 @@
+import {linkLabelSelection, selectCommentText} from "./linkLabelSelection.js";
 import {prepareReturnSourceCorridors} from "./returnSourceCorridors.js";
 import { find } from "./find.js";
 //import { constant } from './constant.js';
@@ -3185,6 +3186,7 @@ class SankeyChart {
   }
 
   draw(id) {
+    this._disposeLabelSelection?.();
     // select node
     const container = select(`#${id}`);
     container.selectChildren().remove();
@@ -3193,6 +3195,10 @@ class SankeyChart {
       .append("svg")
       .attr("width", this.config.width)
       .attr("height", this.config.height);
+
+    // Hide only the browser highlight; keep the native selection available to
+    // the host's comment UI. Other document text keeps its normal selection.
+    svg.append("style").text(".sankey-comment-anchor::selection { background-color: transparent; color: inherit; }");
 
     // Root group for all chart content. We'll optionally translate it in Y at the end
     // to center (and fully fit) the rendered content inside the SVG viewport.
@@ -3240,7 +3246,20 @@ class SankeyChart {
       .enter()
       .append("g")
       .attr("class", "link-label-group")
-      .style("opacity", 0);
+      .attr("data-link-source", d => this.config.id(d.source))
+      .attr("data-link-target", d => this.config.id(d.target))
+      .style("opacity", 0)
+      .style("visibility", "hidden")
+      .style("pointer-events", "visiblePainted")
+      .style("cursor", "text")
+      .style("user-select", "text")
+      .style("-webkit-user-select", "text");
+
+    const showLinkLabels = visible => {
+      linkLabels
+        .style("opacity", l => (typeof visible === "function" ? visible(l) : visible) ? 1 : 0)
+        .style("visibility", l => (typeof visible === "function" ? visible(l) : visible) ? "visible" : "hidden");
+    };
 
     // Avoid flicker on node mouseleave:
     // We fade labels out (opacity transition) and only THEN reset their text/anchor positions.
@@ -3277,7 +3296,7 @@ class SankeyChart {
       lockedHoverCallback = callback; // Store for potential lock
       pendingHoverTimer = setTimeout(() => {
         pendingHoverTimer = null;
-        callback();
+        if (!labelSelection.active()) callback();
       }, 120); // hover intent delay
     };
     
@@ -3340,23 +3359,58 @@ class SankeyChart {
         .style("opacity", 1);
         
       // Hide labels
-      linkLabels.style("opacity", 0);
+      showLinkLabels(false);
     };
     
-    // Document-level click handler to unlock hover when clicking anywhere outside nodes/links
-    if (typeof document !== "undefined") {
-      document.addEventListener("click", function() {
-        if (hoverLocked) {
-          unlockHover();
-          restoreAllToDefault();
-        }
-      });
-    }
-    
+    const cancelLabelChanges = () => {
+      cancelPendingHover();
+      cancelPendingRestore();
+      cancelPendingLabelHide();
+      if (pendingLabelResetTimer != null) {
+        clearTimeout(pendingLabelResetTimer);
+        pendingLabelResetTimer = null;
+      }
+    };
+    const labelSelection = linkLabelSelection(svg.node(), linkLabelsG.node(),
+      () => { hoverLocked = true; }, cancelLabelChanges);
+    const onDocumentClick = event => {
+      if (labelSelection.keepOnClick(event)) return;
+      labelSelection.release();
+      if (hoverLocked) {
+        unlockHover();
+        restoreAllToDefault();
+      }
+    };
+    svg.node().ownerDocument.addEventListener("click", onDocumentClick);
+    this._disposeLabelSelection = () => {
+      cancelLabelChanges();
+      labelSelection.dispose();
+      svg.node().ownerDocument.removeEventListener("click", onDocumentClick);
+    };
+
+    let commentTarget = null;
+    const percentageFor = link => linkLabels
+      .filter(l => l === link || l.index === link.index)
+      .selectAll("text")
+      .filter(function() { return !!this.textContent.trim(); })
+      .node();
+    const activateComment = function(event, data, enter, text) {
+      if (event.button != null && event.button !== 0) return;
+      labelSelection.release();
+      enter.call(this, event, data);
+      cancelLabelChanges();
+      lockedHoverCallback?.();
+      hoverLocked = true;
+      if (selectCommentText(text())) {
+        labelSelection.hold();
+        commentTarget = this;
+      }
+    };
 
     // Source label (For Backlinks)
     linkLabels.append("text")
-      .attr("class", "link-label-source")
+      .attr("class", "link-label-source sankey-comment-anchor")
+      .attr("id", d => `${id}-link-${d.index}-source-percent`)
       .attr("x", d => _linkLabelAnchorX(d, "source"))
       .attr("y", d => _linkLabelAnchorY(d, "source", "below"))
       .style("font-size", "10px")
@@ -3366,7 +3420,8 @@ class SankeyChart {
 
     // Target label (For Normal Links)
     linkLabels.append("text")
-      .attr("class", "link-label-target")
+      .attr("class", "link-label-target sankey-comment-anchor")
+      .attr("id", d => `${id}-link-${d.index}-target-percent`)
       .attr("x", d => {
         return _linkLabelAnchorX(d, "target");
       })
@@ -3379,7 +3434,8 @@ class SankeyChart {
 
     // Self-Link Label (Inside Arc)
     linkLabels.append("text")
-      .attr("class", "link-label-self")
+      .attr("class", "link-label-self sankey-comment-anchor")
+      .attr("id", d => `${id}-link-${d.index}-self-percent`)
       .attr("x", d => {
         if (d.circular && d.circularPathData) {
             // Always keep self-loop label horizontally centered in the loop rectangle.
@@ -3426,6 +3482,10 @@ class SankeyChart {
 
     const nodeLabels = node
       .append("text")
+      .attr("class", "sankey-comment-anchor")
+      .attr("id", d => `${id}-node-label-${encodeURIComponent(String(this.config.id(d)))}`)
+      .style("user-select", "text")
+      .style("-webkit-user-select", "text")
       .attr("x", (d) => (d.x0 + d.x1) / 2)
       .attr("y", (d) => d.y0 - 8)
       .attr("text-anchor", "middle");
@@ -3463,8 +3523,7 @@ class SankeyChart {
     const nodeOpacity = this.config.nodes.opacity;
     const linkOpacity = this.config.links.opacity;
     
-    node
-      .on("mouseenter", function(event, d) {
+    const onNodeEnter = function(event, d) {
         // Cancel any pending operations
         cancelPendingHover();
         cancelPendingLabelHide();
@@ -3535,8 +3594,8 @@ class SankeyChart {
             );
           
           // Show labels for connected links
-          linkLabels.style("opacity", (l, i) => {
-            const linkIdx = l.index !== undefined ? l.index : i;
+          showLinkLabels(l => {
+            const linkIdx = l.index;
             return connectedLinkIndices.has(linkIdx) ? 1 : 0;
           });
 
@@ -3567,7 +3626,9 @@ class SankeyChart {
             return base;
           });
         });
-      })
+      };
+    node
+      .on("mouseenter", onNodeEnter)
       .on("mouseleave", function() {
         cancelPendingHover();
         
@@ -3586,57 +3647,17 @@ class SankeyChart {
             .style("opacity", 1);
             
           // Hide all link labels
-          linkLabels.style("opacity", 0);
+          showLinkLabels(false);
           scheduleLabelResetAfterFade();
         });
       })
+      .on("mouseup", function(event, d) {
+        activateComment.call(this, event, d, onNodeEnter, () => select(this).select("text").node());
+      })
       .on("click", function(event, d) {
-        try {
-          if (event && typeof event.stopPropagation === "function") event.stopPropagation();
-        } catch (e) {
-          // ignore
-        }
-        
-        // Lock hover state on click
-        cancelPendingHover();
-        cancelPendingRestore();
-        
-        // If hover effect hasn't run yet, run it immediately
-        if (lockedHoverCallback) {
-          lockedHoverCallback();
-        }
-        hoverLocked = true;
-        
-        // Copy node name to clipboard
-        const text = d && typeof d.name === "string" ? d.name : String(d?.name ?? "");
-
-        const writeWithFallback = (t) => {
-          if (typeof navigator !== "undefined" && navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
-            return navigator.clipboard.writeText(t);
-          }
-          return new Promise((resolve, reject) => {
-            try {
-              if (typeof document === "undefined") return reject(new Error("No document available"));
-              const ta = document.createElement("textarea");
-              ta.value = t;
-              ta.setAttribute("readonly", "");
-              ta.style.position = "fixed";
-              ta.style.opacity = "0";
-              ta.style.left = "-9999px";
-              ta.style.top = "0";
-              document.body.appendChild(ta);
-              ta.select();
-              const ok = document.execCommand && document.execCommand("copy");
-              document.body.removeChild(ta);
-              if (ok) resolve();
-              else reject(new Error("execCommand(copy) failed"));
-            } catch (e) {
-              reject(e);
-            }
-          });
-        };
-
-        writeWithFallback(text).catch(() => {});
+        event.stopPropagation();
+        if (commentTarget !== this || !labelSelection.active())
+          activateComment.call(this, event, d, onNodeEnter, () => select(this).select("text").node());
       });
 
     var link = linkG.data(linksForDraw).enter().append("g");
@@ -3659,83 +3680,7 @@ class SankeyChart {
     const normalLinkOpacity = this.config.links.opacity;
     const normalNodeOpacity = this.config.nodes.opacity;
 
-    link
-      .filter((d) => d.path)
-      .append("path")
-      .attr("class", (d) => {
-        const baseClass = "sankey-link";
-        if (linkTypes && typeAccessor) {
-          const linkType = typeAccessor(d);
-          if (linkType) {
-            return `${baseClass} sankey-link-type-${linkType}`;
-          }
-        }
-        return baseClass;
-      })
-      .attr("d", (d) => d.path)
-      .style("fill", "none")
-      .style("stroke-width", (d) => Math.max(1, d.width))
-      .style("stroke", getLinkColor)
-      .style("cursor", "pointer")
-      .style("pointer-events", "visibleStroke")
-      .on("click", function(event, d) {
-        try {
-          if (event && typeof event.stopPropagation === "function") event.stopPropagation();
-        } catch (e) {
-          // ignore
-        }
-        
-        // Lock hover state on click
-        cancelPendingHover();
-        cancelPendingRestore();
-        
-        // If hover effect hasn't run yet, run it immediately
-        if (lockedHoverCallback) {
-          lockedHoverCallback();
-        }
-        hoverLocked = true;
-
-        // Copy "{source.name} → {target.name}" to clipboard
-        const nameOf = (n) => {
-          if (n == null) return "";
-          if (typeof n === "string") return n;
-          if (typeof n.name === "string") return n.name;
-          return String(n.name ?? n.index ?? "");
-        };
-        const src = nameOf(d && d.source);
-        const tgt = nameOf(d && d.target);
-        const text = `${src} → ${tgt}`;
-
-        const writeWithFallback = (t) => {
-          if (typeof navigator !== "undefined" && navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
-            return navigator.clipboard.writeText(t);
-          }
-
-          return new Promise((resolve, reject) => {
-            try {
-              if (typeof document === "undefined") return reject(new Error("No document available"));
-              const ta = document.createElement("textarea");
-              ta.value = t;
-              ta.setAttribute("readonly", "");
-              ta.style.position = "fixed";
-              ta.style.opacity = "0";
-              ta.style.left = "-9999px";
-              ta.style.top = "0";
-              document.body.appendChild(ta);
-              ta.select();
-              const ok = document.execCommand && document.execCommand("copy");
-              document.body.removeChild(ta);
-              if (ok) resolve();
-              else reject(new Error("execCommand(copy) failed"));
-            } catch (e) {
-              reject(e);
-            }
-          });
-        };
-
-        writeWithFallback(text).catch(() => {});
-      })
-      .on("mouseenter", function(event, d) {
+    const onLinkEnter = function(event, d) {
         // Cancel any pending operations
         cancelPendingHover();
         cancelPendingLabelHide();
@@ -3772,7 +3717,7 @@ class SankeyChart {
           const thisLinkIndex = d.index;
           const thisParentLink = d.parentLink;
           
-          linkLabels.style("opacity", (l) => {
+          showLinkLabels((l) => {
             if (l.index === thisLinkIndex) return 1;
             if (thisParentLink !== undefined && l.parentLink === thisParentLink) return 1;
             return 0;
@@ -3807,7 +3752,36 @@ class SankeyChart {
             .selectAll("text")
             .style("opacity", 1);
         });
+      };
+
+    link
+      .filter((d) => d.path)
+      .append("path")
+      .attr("class", (d) => {
+        const baseClass = "sankey-link";
+        if (linkTypes && typeAccessor) {
+          const linkType = typeAccessor(d);
+          if (linkType) {
+            return `${baseClass} sankey-link-type-${linkType}`;
+          }
+        }
+        return baseClass;
       })
+      .attr("d", (d) => d.path)
+      .style("fill", "none")
+      .style("stroke-width", (d) => Math.max(1, d.width))
+      .style("stroke", getLinkColor)
+      .style("cursor", "pointer")
+      .style("pointer-events", "visibleStroke")
+      .on("mouseup", function(event, d) {
+        activateComment.call(this, event, d, onLinkEnter, () => percentageFor(d));
+      })
+      .on("click", function(event, d) {
+        event.stopPropagation();
+        if (commentTarget !== this || !labelSelection.active())
+          activateComment.call(this, event, d, onLinkEnter, () => percentageFor(d));
+      })
+      .on("mouseenter", onLinkEnter)
       .on("mouseleave", function() {
         cancelPendingHover();
         
@@ -3825,7 +3799,7 @@ class SankeyChart {
             .style("opacity", 1);
             
           // Hide labels
-          linkLabels.style("opacity", 0);
+          showLinkLabels(false);
         });
       });
 
@@ -3965,6 +3939,9 @@ class SankeyChart {
           .style("fill", arrowColor);
       });
     }
+
+    // Percentages must stay above ribbons for hit testing and native text selection.
+    linkLabelsG.raise();
 
     // Post-render vertical centering / fit:
     // Some circular links extend beyond graph.y0/y1 (their control points live outside),
