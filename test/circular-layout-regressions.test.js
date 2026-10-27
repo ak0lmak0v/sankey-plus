@@ -619,3 +619,43 @@ for (const width of [1200, 1500, 2000]) test('top bundle boundaries follow tight
         (link.width + other.width) / 2, 'The complete target turns must remain separate across bundle boundaries');
   }
 });
+
+for (const width of [1200, 1500, 2000]) test('top shelf moves propagate through target bundles in earlier columns at width ' + width, () => {
+  const data = topReturnShelfGraph();
+  data.nodes.find(n => n.name === 'origin').horizontalSort = -1;
+  data.nodes.push({name: 'earlier', horizontalSort: 0, verticalSort: 0});
+  data.links = data.links.filter(l => !(l.source === 'local' && l.target === 'cap'));
+  data.links.push({source: 'origin', target: 'earlier', value: 18},
+    {source: 'earlier', target: 'target', value: 14},
+    {source: 'target', target: 'local', value: 13, _forceCircularLinkType: 'top'},
+    {source: 'local', target: 'earlier', value: 5, _forceCircularLinkType: 'top'},
+    {source: 'target', target: 'earlier', value: 3, _forceCircularLinkType: 'top'});
+  const chart = new SankeyChart({id: n => n.name, align: 'left', width, height: 1000,
+    padding: 25, scale: 0.1, iterations: 10,
+    nodes: {data: data.nodes, width: 15, padding: 25, minPadding: 30,
+      virtualPadding: 7, horizontalSort: true, verticalSort: true},
+    links: {data: data.links, circularGap: 1, baseRadius: 5, verticalMargin: 100,
+      sortIterations: 12, postSortIterations: 4}, arrows: {enabled: false}});
+  chart.process();
+  const returns = chart.graph.links.filter(l => l.circular && !l.isVirtual &&
+    l.circularLinkType === 'top' && l.source !== l.target)
+    .sort((a, b) => b.circularPathData.verticalFullExtent - a.circularPathData.verticalFullExtent);
+  assert.equal(returns.length, 6);
+  assert.equal(new Set(returns.map(l => l.target)).size, 3, 'Exercise a chain of three whole target bundles');
+  assert.equal(new Set(returns.map(l => l.target.column)).size, 2, 'Propagate beyond the previous target column');
+  for (let i = 1; i < returns.length; i++) {
+    const a = returns[i - 1], b = returns[i];
+    close(a.circularPathData.verticalFullExtent - b.circularPathData.verticalFullExtent -
+      (a.width + b.width) / 2, 1, 'No obsolete shelf slot may remain anywhere in the bundle chain');
+  }
+  const earlier = returns.filter(l => l.target.name === 'earlier');
+  assert.equal(earlier.length, 2);
+  for (const link of returns) {
+    const c = link.circularPathData;
+    assert.ok(c.verticalLeftInnerExtent <= c.targetY - c.leftSmallArcRadius + 1e-6, 'Target leg must not fold');
+    assert.ok(c.verticalRightInnerExtent <= c.sourceY - c.rightSmallArcRadius + 1e-6, 'Source leg must not fold');
+    assert.ok(!/NaN|Infinity/.test(link.path));
+  }
+  assert.ok(minDistance(samplePath(earlier[0].path, 220), samplePath(earlier[1].path, 220)) + 0.3 >=
+    (earlier[0].width + earlier[1].width) / 2, 'Moving a whole earlier-column bundle must retain its full-route clearance');
+});

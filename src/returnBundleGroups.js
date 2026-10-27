@@ -151,8 +151,25 @@ export function compactTopReturnShelves(graph, gap, baseRadius = 5) {
     }
     return ceiling;
   }
-  for (const group of groups.values()) {
+  // Preserve the already adjacent whole-bundle chain before any inner
+  // shelves move. Dependencies can cross target columns: a later enclosing
+  // frame must follow its inner neighbor regardless of where it terminates.
+  const frames = Array.from(groups.values(), group => {
     group.sort((a, b) => b.circularPathData.verticalFullExtent - a.circularPathData.verticalFullExtent);
+    return {group, inner: group[0], outer: group[group.length - 1], dependencies: []};
+  }).sort((a, b) => b.inner.circularPathData.verticalFullExtent - a.inner.circularPathData.verticalFullExtent);
+  for (let i = 1; i < frames.length; i++) {
+    const frame = frames[i], c = frame.inner.circularPathData;
+    for (let j = 0; j < i; j++) {
+      const prev = frames[j], pc = prev.outer.circularPathData;
+      const clearance = half(prev.outer) + half(frame.inner) + gap;
+      const [x0, x1] = shelf(c), [px0, px1] = shelf(pc);
+      if (x1 <= px0 || px1 <= x0 ||
+          Math.abs(pc.verticalFullExtent - c.verticalFullExtent - clearance) > 1e-5) continue;
+      frame.dependencies.push({inner: prev.outer, clearance});
+    }
+  }
+  for (const group of groups.values()) {
     for (let i = 1; i < group.length; i++) {
       const link = group[i], c = link.circularPathData;
       const prev = group[i - 1], pc = prev.circularPathData;
@@ -175,37 +192,25 @@ export function compactTopReturnShelves(graph, gap, baseRadius = 5) {
       if (Number.isFinite(c.verticalBuffer)) c.verticalBuffer -= shift;
     }
   }
-  // An inner bundle may have moved after its enclosing target-column frame
-  // was allocated. Bring the whole outer bundle along; moving only one member
-  // would reopen gaps inside it. Adjacent target axes identify a vacant lane,
-  // while turnCeiling retains all source, node and unrelated-shelf constraints.
-  const columns = new Map();
-  for (const [target, group] of groups) {
-    if (!columns.has(target.column)) columns.set(target.column, []);
-    columns.get(target.column).push(group);
-  }
-  for (const bundles of columns.values()) {
-    bundles.sort((a, b) => b[0].circularPathData.verticalFullExtent - a[0].circularPathData.verticalFullExtent);
-    for (let i = 1; i < bundles.length; i++) {
-      const group = bundles[i], prevGroup = bundles[i - 1];
-      const inner = prevGroup[prevGroup.length - 1], outer = group[0];
-      const pc = inner.circularPathData, c = outer.circularPathData;
-      const clearance = half(inner) + half(outer) + gap;
-      if (c.verticalFullExtent >= pc.verticalFullExtent || c.targetY < pc.targetY ||
-          Math.abs(c.leftInnerExtent - pc.leftInnerExtent) > 1e-6 ||
-          Math.abs(c.leftLargeArcRadius - pc.leftLargeArcRadius - clearance) > 1e-6) continue;
-      let shift = pc.verticalFullExtent - clearance - c.verticalFullExtent;
-      for (const link of group)
-        shift = Math.min(shift, turnCeiling(link, group, link.circularPathData.leftSmallArcRadius) -
-          link.circularPathData.verticalFullExtent);
-      if (!(shift > 1e-6)) continue;
-      for (const link of group) {
-        const c = link.circularPathData;
-        c.verticalFullExtent += shift;
-        c.verticalLeftInnerExtent += shift;
-        c.verticalRightInnerExtent += shift;
-        if (Number.isFinite(c.verticalBuffer)) c.verticalBuffer -= shift;
-      }
+  // Process from inner to outer so a shift reaches every following frame
+  // in one pass. Move the complete bundle, retaining its internal radii and
+  // spacing, and cap the shift by all node, turn and unrelated-shelf bounds.
+  for (const {group, inner, dependencies} of frames) {
+    let shift = 0;
+    for (const dependency of dependencies)
+      shift = Math.max(shift, dependency.inner.circularPathData.verticalFullExtent -
+        inner.circularPathData.verticalFullExtent - dependency.clearance);
+    if (!(shift > 1e-5)) continue;
+    for (const link of group)
+      shift = Math.min(shift, turnCeiling(link, group, link.circularPathData.leftSmallArcRadius) -
+        link.circularPathData.verticalFullExtent);
+    if (!(shift > 1e-5)) continue;
+    for (const link of group) {
+      const c = link.circularPathData;
+      c.verticalFullExtent += shift;
+      c.verticalLeftInnerExtent += shift;
+      c.verticalRightInnerExtent += shift;
+      if (Number.isFinite(c.verticalBuffer)) c.verticalBuffer -= shift;
     }
   }
 }
