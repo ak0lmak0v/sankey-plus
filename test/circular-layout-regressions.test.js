@@ -457,3 +457,165 @@ test(`bottom target turns release vacant shelf slots at width ${width}`, () => {
         (link.width + other.width) / 2, 'Compacted target corners and complete bottom routes must retain clearance');
   }
 });
+
+
+// Independently authored integer-weight graph: two return destinations in
+// neighboring columns, three sources sharing a column, and local cycles.
+function neighboringReturnTargets() {
+  const nodes = [["origin", -1, 0], ["far", 0, -1], ["near", 1, 0], ["cap", 1, 1], ["turn0", 3, 0], ["turn1", 3, 1], ["turn2", 3, 2], ["sink", 4, 0]].map(([name, horizontalSort, verticalSort]) => ({name, horizontalSort, verticalSort}));
+  const links = [["origin", "far", 20], ["origin", "near", 45], ["origin", "cap", 35], ["far", "near", 14], ["near", "cap", 17], ["cap", "near", 15], ["cap", "far", 2], ["near", "far", 3], ["far", "far", 7], ["cap", "cap", 8], ["near", "near", 12], ["far", "turn0", 3], ["near", "turn0", 15], ["cap", "turn0", 9], ["turn0", "sink", 18], ["turn0", "near", 11], ["turn0", "far", 3], ["turn0", "cap", 2], ["far", "turn1", 4], ["near", "turn1", 13], ["cap", "turn1", 10], ["turn1", "sink", 18], ["turn1", "near", 9], ["turn1", "far", 4], ["turn1", "cap", 3], ["far", "turn2", 5], ["near", "turn2", 11], ["cap", "turn2", 11], ["turn2", "sink", 18], ["turn2", "near", 7], ["turn2", "far", 5], ["turn2", "cap", 4]].map(([source, target, value]) => ({source, target, value}));
+  return {nodes, links};
+}
+for (const width of [1500, 1800, 2400]) {
+  test('compaction preserves whole return target bundles at width ' + width, () => {
+    const data = neighboringReturnTargets();
+    const chart = new SankeyChart({
+      align: 'left', id: n => n.name, width, height: 1000, scale: 0.3,
+      iterations: 10, padding: 25,
+      nodes: {data: data.nodes, width: 15, padding: 25, minPadding: 30,
+        virtualPadding: 7, horizontalSort: true, verticalSort: true},
+      links: {data: data.links, circularGap: 1, baseRadius: 5, verticalMargin: 100,
+        sortIterations: 12, postSortIterations: 4},
+      arrows: {enabled: false}
+    });
+    chart.process();
+    const returns = chart.graph.links.filter(l => l.circular && !l.isVirtual &&
+      l.circularLinkType === 'bottom' && l.source.name.startsWith('turn') &&
+      ['near', 'far'].includes(l.target.name));
+    assert.equal(returns.length, 6);
+    const nearEdge = Math.max(...returns.filter(l => l.target.name === 'near')
+      .map(l => l.circularPathData.verticalFullExtent + l.width / 2));
+    const farEdge = Math.min(...returns.filter(l => l.target.name === 'far')
+      .map(l => l.circularPathData.verticalFullExtent - l.width / 2));
+    assert.ok(farEdge - nearEdge >= 1 - 1e-6,
+      'A farther target bundle must follow the entire nearer target bundle');
+    for (const group of ['near', 'far'].map(name => returns.filter(l => l.target.name === name))) {
+      for (const coordinate of ['verticalFullExtent', 'rightFullExtent']) {
+        group.sort((a, b) => a.circularPathData[coordinate] - b.circularPathData[coordinate]);
+        for (let i = 1; i < group.length; i++) {
+          const a = group[i - 1], b = group[i];
+          const gap = b.circularPathData[coordinate] - a.circularPathData[coordinate] - (a.width + b.width) / 2;
+          close(gap, 1, 'Compaction must remove unused shelf and right-leg slots');
+        }
+      }
+      for (const link of group) assertRoundRoute(link);
+      for (let i = 0; i < group.length; i++) for (let j = i + 1; j < group.length; j++) {
+        const a = group[i], b = group[j];
+        assert.ok(minDistance(samplePath(a.path, 220), samplePath(b.path, 220)) + 0.3 >=
+          (a.width + b.width) / 2, 'Packing a target bundle must preserve complete-route clearance');
+      }
+    }
+    const centers = returns.map(link => ({
+      x: link.circularPathData.rightFullExtent - link.circularPathData.rightLargeArcRadius,
+      y: link.circularPathData.verticalFullExtent - link.circularPathData.rightLargeArcRadius
+    }));
+    for (const center of centers) {
+      close(center.x, centers[0].x, 'Adjacent target bundles must share their source-side bend center');
+      close(center.y, centers[0].y, 'Adjacent target bundles must form concentric source-side turns');
+    }
+    for (const link of returns) assert.ok(!/NaN|Infinity/.test(link.path));
+  });
+}
+
+
+test('staggered bundle consolidation keeps internal spacing, bend radii and nodes intact', async () => {
+  const source = fs.readFileSync(path.join(__dirname, '../src/returnBundleGroups.js'), 'utf8');
+  const {preserveReturnBundleGroups} = await import('data:text/javascript;base64,' + Buffer.from(source).toString('base64'));
+  const origin = {column: 4, x0: 300, x1: 315, y0: 10, y1: 50};
+  const near = {column: 2}, far = {column: 1};
+  const makeLink = (target, shelf) => ({source: origin, target, circular: true,
+    circularLinkType: 'bottom', width: 4,
+    circularPathData: {verticalFullExtent: shelf, verticalRightInnerExtent: shelf - 8,
+      verticalLeftInnerExtent: shelf - 6, verticalBuffer: 5,
+      rightLargeArcRadius: 8, leftLargeArcRadius: 6, sourceX: shelf, rightFullExtent: shelf + 10}});
+  const links = [makeLink(near, 100), makeLink(far, 110), makeLink(near, 120), makeLink(far, 130)];
+  const before = structuredClone(links), nodeBefore = {...origin};
+  preserveReturnBundleGroups({links}, 1);
+  close(links[3].circularPathData.verticalFullExtent - links[1].circularPathData.verticalFullExtent, 20);
+  for (let i = 0; i < links.length; i++) {
+    const old = before[i].circularPathData, now = links[i].circularPathData;
+    close(now.verticalFullExtent - now.verticalRightInnerExtent, old.verticalFullExtent - old.verticalRightInnerExtent);
+    close(now.verticalFullExtent - now.verticalLeftInnerExtent, old.verticalFullExtent - old.verticalLeftInnerExtent);
+    close(now.leftLargeArcRadius, old.leftLargeArcRadius); close(now.rightLargeArcRadius, old.rightLargeArcRadius);
+  }
+  assert.deepEqual(origin, nodeBefore);
+  const once = JSON.stringify(links); preserveReturnBundleGroups({links}, 1);
+  assert.equal(JSON.stringify(links), once, 'Repeated finalization must be stable');
+});
+
+
+function topReturnShelfGraph() {
+  // Small independent integer-weight cycle with a same-column arrival and
+  // two later-column arrivals. A neighboring branch tightens the target turns.
+  const nodes = [['origin', 0, 0], ['target', 1, 2], ['local', 1, 0],
+    ['cap', 1, -1], ['turn0', 2, 0], ['turn1', 2, 1], ['turn2', 2, 2], ['sink', 3, 0]]
+    .map(([name, horizontalSort, verticalSort]) => ({name, horizontalSort, verticalSort}));
+  const links = [['origin', 'local', 25], ['target', 'turn2', 30],
+    ['local', 'target', 9], ['cap', 'cap', 7], ['local', 'cap', 3],
+    ['cap', 'turn1', 9], ['turn0', 'sink', 15],
+    ['turn1', 'target', 7], ['turn2', 'target', 11]]
+    .map(([source, target, value]) => ({source, target, value,
+      ...(target === 'target' || source === target ? {_forceCircularLinkType: 'top'} : {})}));
+  return {nodes, links};
+}
+for (const width of [1200, 1500, 2000]) test('top return shelves count their gap once at width ' + width, () => {
+  const data = topReturnShelfGraph();
+  const chart = new SankeyChart({id: n => n.name, align: 'left', width, height: 1000,
+    padding: 25, scale: 0.1, iterations: 10,
+    nodes: {data: data.nodes, width: 15, padding: 25, minPadding: 30,
+      virtualPadding: 7, horizontalSort: true, verticalSort: true},
+    links: {data: data.links, circularGap: 1, baseRadius: 5, verticalMargin: 100,
+      sortIterations: 12, postSortIterations: 4}, arrows: {enabled: false}});
+  chart.process();
+  const group = chart.graph.links.filter(l => l.circular && !l.isVirtual && l.target.name === 'target')
+    .sort((a, b) => b.circularPathData.verticalFullExtent - a.circularPathData.verticalFullExtent);
+  assert.equal(group.length, 3);
+  assert.ok(group.every(l => l.width > 1), 'Exercise visible strokes');
+  assert.equal(group[0].source.column, group[0].target.column, 'Include the local inner return');
+  for (let i = 1; i < group.length; i++) {
+    const a = group[i - 1], b = group[i];
+    close(a.circularPathData.verticalFullExtent - b.circularPathData.verticalFullExtent -
+      (a.width + b.width) / 2, 1, 'Top shelves must not count the turn clearance twice');
+  }
+  for (const link of group) {
+    const c = link.circularPathData;
+    assert.ok(c.verticalLeftInnerExtent <= c.targetY - c.leftSmallArcRadius + 1e-6,
+      'Tightening must not fold the target leg');
+    for (const other of group.filter(l => l !== link))
+      assert.ok(minDistance(samplePath(link.path, 220), samplePath(other.path, 220)) + 0.3 >=
+        (link.width + other.width) / 2, 'Compacted top return curves must remain separate');
+  }
+});
+
+
+for (const width of [1200, 1500, 2000]) test('top bundle boundaries follow tightened inner shelves at width ' + width, () => {
+  const data = topReturnShelfGraph();
+  data.links = data.links.filter(l => !(l.source === 'local' && l.target === 'cap'));
+  data.links.push({source: 'target', target: 'local', value: 13, _forceCircularLinkType: 'top'});
+  const chart = new SankeyChart({id: n => n.name, align: 'left', width, height: 1000,
+    padding: 25, scale: 0.1, iterations: 10,
+    nodes: {data: data.nodes, width: 15, padding: 25, minPadding: 30,
+      virtualPadding: 7, horizontalSort: true, verticalSort: true},
+    links: {data: data.links, circularGap: 1, baseRadius: 5, verticalMargin: 100,
+      sortIterations: 12, postSortIterations: 4}, arrows: {enabled: false}});
+  chart.process();
+  const returns = chart.graph.links.filter(l => l.circular && !l.isVirtual &&
+    l.circularLinkType === 'top' && l.source !== l.target);
+  const inner = returns.filter(l => l.target.name === 'target')
+    .sort((a, b) => a.circularPathData.verticalFullExtent - b.circularPathData.verticalFullExtent)[0];
+  const outer = returns.find(l => l.source.name === 'target' && l.target.name === 'local');
+  close(inner.circularPathData.verticalFullExtent - outer.circularPathData.verticalFullExtent -
+    (inner.width + outer.width) / 2, 1, 'Neighboring target bundles must follow an inward shelf move');
+  close(inner.circularPathData.verticalLeftInnerExtent, outer.circularPathData.verticalLeftInnerExtent,
+    'Neighboring target bundles must retain a common shelf bend center');
+  for (const link of returns) {
+    const c = link.circularPathData;
+    assert.ok(c.verticalLeftInnerExtent <= c.targetY - c.leftSmallArcRadius + 1e-6);
+    assert.ok(c.verticalRightInnerExtent <= c.sourceY - c.rightSmallArcRadius + 1e-6);
+    for (const other of returns.filter(l => l !== link))
+      assert.ok(minDistance(
+        samplePath(link.path, 220).filter(([x]) => x <= link.target.x0),
+        samplePath(other.path, 220).filter(([x]) => x <= other.target.x0)) + 0.3 >=
+        (link.width + other.width) / 2, 'The complete target turns must remain separate across bundle boundaries');
+  }
+});

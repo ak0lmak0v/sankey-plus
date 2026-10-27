@@ -1,3 +1,4 @@
+import {preserveReturnBundleGroups, compactTopReturnShelves} from "./returnBundleGroups.js";
 import {min, linkHorizontal} from "d3";
 
 import { selfLinking, onlyCircularLink } from "./linkAttributes.js";
@@ -7007,6 +7008,11 @@ export function addCircularPathData(
       });
       if(shift>1e-6)moveLaterColumns(column,shift);
     });
+  }
+
+  if (compactFinalBacklinks) {
+    preserveReturnBundleGroups(graph, circularLinkGap || 0, baseRadius);
+    compactTopReturnShelves(graph, circularLinkGap || 0, baseRadius);
   }
 
   graph.links.forEach(function(link) {
