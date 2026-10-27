@@ -3249,7 +3249,6 @@ class SankeyChart {
       .attr("data-link-source", d => this.config.id(d.source))
       .attr("data-link-target", d => this.config.id(d.target))
       .style("opacity", 0)
-      .style("visibility", "hidden")
       .style("pointer-events", "visiblePainted")
       .style("cursor", "text")
       .style("user-select", "text")
@@ -3257,8 +3256,20 @@ class SankeyChart {
 
     const showLinkLabels = visible => {
       linkLabels
-        .style("opacity", l => (typeof visible === "function" ? visible(l) : visible) ? 1 : 0)
-        .style("visibility", l => (typeof visible === "function" ? visible(l) : visible) ? "visible" : "hidden");
+        .style("opacity", l => (typeof visible === "function" ? visible(l) : visible) ? 1 : 0);
+      updateLabelHitTargets();
+    };
+    const updateLabelHitTargets = () => linkLabels.selectAll("text")
+      .style("pointer-events", function() {
+        return this.style.opacity === "1" && this.parentElement.style.opacity === "1" ? "visiblePainted" : "none";
+      });
+    // Keep anchor text in the DOM, even when a label is not currently painted.
+    // Replacing textContent or using visibility:hidden invalidates host quotes.
+    const setLabelMode = (mode, hoveredNode) => {
+      for (const position of ["source", "target", "self"])
+        linkLabels.select(`.link-label-${position}`)
+          .style("opacity", l => _linkLabelText(l, position, mode, hoveredNode) ? 1 : 0);
+      updateLabelHitTargets();
     };
 
     // Avoid flicker on node mouseleave:
@@ -3330,10 +3341,8 @@ class SankeyChart {
       }
       pendingLabelResetTimer = setTimeout(() => {
         pendingLabelResetTimer = null;
-        // Restore default (link-hover) text rules
-        linkLabels.select(".link-label-source").text(l => _linkLabelText(l, "source", "link"));
-        linkLabels.select(".link-label-target").text(l => _linkLabelText(l, "target", "link"));
-        linkLabels.select(".link-label-self").text(l => _linkLabelText(l, "self", "link"));
+        // Restore default (link-hover) label placement
+        setLabelMode("link");
 
         // Reset any hover-time Y overrides
         linkLabels.select(".link-label-source").attr("y", l => _linkLabelAnchorY(l, "source", "below"));
@@ -3392,7 +3401,7 @@ class SankeyChart {
     const percentageFor = link => linkLabels
       .filter(l => l === link || l.index === link.index)
       .selectAll("text")
-      .filter(function() { return !!this.textContent.trim(); })
+      .filter(function() { return !!this.textContent.trim() && this.style.opacity === "1"; })
       .node();
     const activateComment = function(event, data, enter, text) {
       if (event.button != null && event.button !== 0) return;
@@ -3416,7 +3425,7 @@ class SankeyChart {
       .style("font-size", "10px")
       .style("fill", "black")
       .style("font-family", "sans-serif")
-      .text(d => _linkLabelText(d, "source", "link"));
+      .text(d => _isSelfLinkForLabels(d) ? "" : d.value + "%");
 
     // Target label (For Normal Links)
     linkLabels.append("text")
@@ -3427,7 +3436,7 @@ class SankeyChart {
       })
       .attr("y", d => _linkLabelAnchorY(d, "target", "below"))
       .attr("text-anchor", "end")
-      .text(d => _linkLabelText(d, "target", "link"))
+      .text(d => _isSelfLinkForLabels(d) ? "" : d.value + "%")
       .style("font-size", "10px")
       .style("fill", "black")
       .style("font-family", "sans-serif");
@@ -3458,6 +3467,8 @@ class SankeyChart {
       .style("fill", "black")
       .style("font-family", "sans-serif")
       .text(d => _linkLabelText(d, "self", "link"));
+
+    setLabelMode("link");
 
     let nodeG = g
       .append("g")
@@ -3514,7 +3525,7 @@ class SankeyChart {
     });
 
     const sankeyGraph = this.graph;
-    node.append("title").text(function (d) {
+    node.attr("aria-label", function (d) {
       return d.name;
     });
 
@@ -3599,10 +3610,8 @@ class SankeyChart {
             return connectedLinkIndices.has(linkIdx) ? 1 : 0;
           });
 
-          // Node-hover mode: show % at SOURCE end for connected links (and keep self-loop label inside).
-          linkLabels.select(".link-label-source").text(l => _linkLabelText(l, "source", "node", d));
-          linkLabels.select(".link-label-target").text(l => _linkLabelText(l, "target", "node", d));
-          linkLabels.select(".link-label-self").text(l => _linkLabelText(l, "self", "node", d));
+          // Node-hover mode: show % at the neighbor end without replacing the quote text.
+          setLabelMode("node", d);
 
           // Small special-case: incoming backlinks from sosisa ◐ into schedule ◐ / schedule ●
           // when shown at TARGET end on node-hover can overlap the circular arc or a nearby node title.
@@ -3689,9 +3698,8 @@ class SankeyChart {
         
         scheduleHover(() => {
           // Ensure link-hover rules are active (in case we last hovered a node).
-          linkLabels.select(".link-label-source").text(l => _linkLabelText(l, "source", "link"));
-          linkLabels.select(".link-label-target").text(l => _linkLabelText(l, "target", "link"));
-          linkLabels.select(".link-label-self").text(l => _linkLabelText(l, "self", "link"));
+          setLabelMode("link");
+
           linkLabels.select(".link-label-source").attr("y", l => _linkLabelAnchorY(l, "source", "below"));
           linkLabels.select(".link-label-target").attr("y", l => _linkLabelAnchorY(l, "target", "below"));
 
@@ -3803,7 +3811,7 @@ class SankeyChart {
         });
       });
 
-    link.append("title").text(function (d) {
+    link.attr("aria-label", function (d) {
       let typeName = "";
       if (linkTypes && typeAccessor) {
         const linkType = typeAccessor(d);
