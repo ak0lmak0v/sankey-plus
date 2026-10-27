@@ -10,6 +10,7 @@ const same = (a, b) => a.size === b.size && [...a].every(item => b.has(item));
 
 export function displayCommentHighlights(svg, onChange) {
   const view = svg.ownerDocument.defaultView;
+  svg.setAttribute('data-comment-highlights', view?.CSS?.highlights ? 'available' : 'unavailable');
   let annotated = new Set(), focused = null, disposed = false, timer;
   const anchorFor = range => {
     if (range.collapsed) return null;

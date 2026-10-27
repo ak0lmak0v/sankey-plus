@@ -26,6 +26,7 @@ test('reads multiline ranges without changing the native registry and emits only
   const f = fixture(t), text = f.svg.querySelector('text'), spans = text.querySelectorAll('tspan');
   const range = f.doc.createRange();
   range.setStart(spans[0].firstChild, 1); range.setEnd(spans[1].firstChild, 3);
+  assert.equal(f.svg.getAttribute('data-comment-highlights'), 'available');
   const highlight = new Set([range]);
   f.registry.set('display-comment-anchor', highlight); f.adapter.refresh();
   assert.deepEqual([...f.updates[0].annotated], [text]);
@@ -61,6 +62,7 @@ test('polling pauses while hidden and disposes when a chart is detached', t => {
 test('unsupported browsers preserve ordinary chart operation without a polling timer', t => {
   const f = fixture(t, false);
   f.adapter.refresh(); f.tick(); assert.equal(f.updates.length, 0);
+  assert.equal(f.svg.getAttribute('data-comment-highlights'), 'unavailable');
 });
 
 test('selection dismissal is scoped to this chart, preserving unrelated report quotes', t => {
