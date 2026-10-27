@@ -20,8 +20,33 @@ export function displayCommentHighlights(svg, onChange) {
       return anchor && svg.contains(anchor) ? anchor : null;
     };
     const start = anchorAt(range.startContainer), end = anchorAt(range.endContainer);
-    // Ignore ranges outside this chart or spanning multiple chart elements.
-    return start && start === end ? start : null;
+    if (start && start === end) return start;
+    // Text-quote resolvers often end at offset 0 in the NEXT label rather than
+    // the final offset of this label. Those are equivalent text boundaries.
+    // Inspect actual selected characters, not just endpoint ancestry. This
+    // also accepts StaticRange and rejects quotes spanning multiple elements.
+    const selected = svg.ownerDocument.createRange();
+    selected.setStart(range.startContainer, range.startOffset);
+    selected.setEnd(range.endContainer, range.endOffset);
+    const quote = selected.toString();
+    if (!quote) return null;
+    const containsQuote = anchor => {
+      if (!selected.intersectsNode(anchor)) return false;
+      const contents = svg.ownerDocument.createRange();
+      contents.selectNodeContents(anchor);
+      const overlap = selected.cloneRange();
+      if (overlap.compareBoundaryPoints(0, contents) < 0)
+        overlap.setStart(contents.startContainer, contents.startOffset);
+      if (overlap.compareBoundaryPoints(2, contents) > 0)
+        overlap.setEnd(contents.endContainer, contents.endOffset);
+      return !overlap.collapsed && overlap.toString() === quote;
+    };
+    for (const anchor of new Set([start, end].filter(Boolean)))
+      if (containsQuote(anchor)) return anchor;
+    // Ranges may have both endpoints just outside the label's text subtree.
+    for (const anchor of svg.querySelectorAll('.sankey-comment-anchor'))
+      if (containsQuote(anchor)) return anchor;
+    return null;
   };
   const refresh = () => {
     if (disposed) return;

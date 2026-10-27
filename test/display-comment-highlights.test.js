@@ -72,3 +72,24 @@ test('selection dismissal is scoped to this chart, preserving unrelated report q
   selection.removeAllRanges(); selection.addRange(f.range(f.svg.querySelector('text')));
   clearChartSelection(f.svg); assert.equal(selection.rangeCount, 0);
 });
+
+
+test('text-quote half-open boundaries belong to the preceding label, not its next sibling', t => {
+  const f = fixture(t), labels = f.svg.querySelectorAll('text');
+  const range = f.doc.createRange();
+  range.setStart(labels[0].firstChild.firstChild, 0);
+  range.setEnd(labels[1].firstChild, 0);
+  assert.equal(range.toString(), labels[0].textContent);
+  f.registry.set('display-comment-anchor', new Set([range])); f.adapter.refresh();
+  assert.deepEqual([...f.updates[0].annotated], [labels[0]]);
+});
+
+test('a starting boundary at the previous label end belongs to the following quote', t => {
+  const f = fixture(t), labels = f.svg.querySelectorAll('text');
+  const previous = labels[0].lastChild.firstChild;
+  const range = f.doc.createRange();
+  range.setStart(previous, previous.length);
+  range.setEnd(labels[1].firstChild, labels[1].firstChild.length);
+  f.registry.set('display-comment-anchor-focused-open', new Set([range])); f.adapter.refresh();
+  assert.equal(f.updates[0].focused, labels[1]);
+});

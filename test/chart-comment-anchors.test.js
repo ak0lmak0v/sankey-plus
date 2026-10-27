@@ -31,6 +31,12 @@ function fixture(t, highlights = false) {
   t.after(() => { chart._disposeLabelSelection(); dom.window.close(); Object.assign(globalThis, previous); });
   const annotate = (element, name = 'display-comment-anchor') => {
     const range = doc.createRange(); range.selectNodeContents(element);
+    const anchors = [...doc.querySelectorAll('.sankey-comment-anchor')];
+    const next = anchors.slice(anchors.indexOf(element) + 1).find(e => e.firstChild?.nodeType === 3 && e.textContent);
+    if (next) {
+      range.setStart(element.firstChild, 0);
+      range.setEnd(next.firstChild, 0);
+    }
     registry.set(name, new Set([range]));
     return range;
   };
@@ -168,7 +174,7 @@ test('host highlight transfers do not change anchor text or recreate ranges', t 
   assert.ok(label.classList.contains('sankey-commented'));
   registry.clear(); registry.set('display-comment-anchor-focused-open', new Set([range])); poll();
   assert.equal(label.firstChild, textNode);
-  assert.equal(range.startContainer, label);
+  assert.ok(label.contains(range.startContainer));
   assert.equal(doc.body.textContent, context);
   chart.draw('chart');
   assert.equal(polls.size, 1, 'Redraw must dispose the previous registry poller');
