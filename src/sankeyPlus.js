@@ -1,3 +1,4 @@
+import {copyChartText, chartElementText} from "./chartClipboard.js";
 import {displayCommentHighlights, clearChartSelection} from "./displayCommentHighlights.js";
 import {linkLabelSelection, selectCommentText} from "./linkLabelSelection.js";
 import {prepareReturnSourceCorridors} from "./returnSourceCorridors.js";
@@ -3702,6 +3703,8 @@ class SankeyChart {
         activateComment.call(this, event, d, onNodeEnter, () => select(this).select("text").node());
       })
       .on("click", function(event, d) {
+        if (event.button != null && event.button !== 0) return;
+        copyChartText(svg.node(), chartElementText(d));
         const name = select(this).select("text").node();
         if (event.target.closest?.(".sankey-comment-anchor") === name) {
           focusAfterHostClick(event, name);
@@ -3830,6 +3833,8 @@ class SankeyChart {
         activateComment.call(this, event, d, onLinkEnter, () => percentageFor(d));
       })
       .on("click", function(event, d) {
+        if (event.button != null && event.button !== 0) return;
+        copyChartText(svg.node(), chartElementText(d, true));
         commentHighlights.refresh();
         if (!linkHasComment(d)) event.stopPropagation();
         if (commentTarget !== this || !labelSelection.active())
@@ -4036,7 +4041,11 @@ class SankeyChart {
         if (event.button != null && event.button !== 0) return;
         cancelLabelChanges();
       })
-      .on("click", function(event) { focusAfterHostClick(event, this); });
+      .on("click", function(event, d) {
+        if (event.button != null && event.button !== 0) return;
+        copyChartText(svg.node(), chartElementText(d, true));
+        focusAfterHostClick(event, this);
+      });
     commentHighlights = displayCommentHighlights(svg.node(), ({annotated, focused, focusChanged}) => {
       commentedAnchors = annotated;
       g.selectAll(".sankey-comment-anchor")

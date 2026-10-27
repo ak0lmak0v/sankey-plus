@@ -242,3 +242,51 @@ test('a comment on the other percentage endpoint also suppresses duplicate text 
   click(source); await Promise.resolve();
   assert.equal(dom.window.getSelection().toString(), '');
 });
+
+for (const kind of ['node', 'forward', 'return', 'self'])
+  test(kind + ' click copies the original node/route text once without replacing the comment quote', t => {
+    const {doc, dom, chart, click} = fixture(t);
+    const writes = [];
+    Object.defineProperty(dom.window.navigator, 'clipboard', {value: {
+      writeText: text => { writes.push(text); return Promise.resolve(); }
+    }});
+    const label = doc.getElementById('chart-node-label-target');
+    const link = chart.graph.links.find(l => kind === 'self' ? l.source === l.target :
+      kind === 'return' ? l.source.name === 'sink' : l.source.name === 'origin');
+    const target = kind === 'node' ? label.parentElement.querySelector('rect') :
+      [...doc.querySelectorAll('.sankey-link')].find(e => e.__data__ === link);
+    click(target);
+    assert.deepEqual(writes, [kind === 'node' ? 'target' : `${link.source.name} → ${link.target.name}`]);
+    assert.equal(dom.window.getSelection().toString(), kind === 'node' ? 'target' : link.value + '%');
+  });
+
+test('clicks on annotated node names and percentages still copy while reaching the host', async t => {
+  const {doc, dom, chart, click, annotate, poll} = fixture(t, true);
+  const writes = [];
+  Object.defineProperty(dom.window.navigator, 'clipboard', {value: {
+    writeText: text => { writes.push(text); return Promise.resolve(); }
+  }});
+  const label = doc.getElementById('chart-node-label-target');
+  const link = chart.graph.links.find(l => l.source.name === 'origin');
+  const percent = doc.getElementById(`chart-link-${link.index}-target-percent`);
+  const range = annotate(label);
+  const percentRange = doc.createRange(); percentRange.selectNodeContents(percent);
+  const registry = new Set([range, percentRange]);
+  // Both existing threads are painted by the public highlight registry.
+  dom.window.CSS.highlights.set('display-comment-anchor', registry); poll();
+  let delivered = 0;
+  doc.addEventListener('click', () => delivered++);
+  click(label); await Promise.resolve();
+  click(percent); await Promise.resolve();
+  assert.deepEqual(writes, ['target', `${link.source.name} → ${link.target.name}`]);
+  assert.equal(delivered, 2);
+  assert.equal(dom.window.getSelection().toString(), '', 'Existing comments must not offer a duplicate Comment action');
+});
+
+test('focusing an existing comment never overwrites the clipboard', t => {
+  const {doc, dom, annotate, poll} = fixture(t, true);
+  let writes = 0;
+  Object.defineProperty(dom.window.navigator, 'clipboard', {value: {writeText: () => { writes++; }}});
+  annotate(doc.getElementById('chart-node-label-target'), 'display-comment-anchor-focused-open'); poll();
+  assert.equal(writes, 0);
+});
