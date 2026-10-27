@@ -214,3 +214,111 @@ export function compactTopReturnShelves(graph, gap, baseRadius = 5) {
     }
   }
 }
+
+// Reuse source-column slots as whole target families after per-node routing.
+// Local loops and wrapped departures own separate frames and are left intact.
+export function groupTopSourceLegs(graph, gap, baseRadius = 5) {
+  const columns = new Map();
+  for (const link of graph.links) {
+    if (!link.circular || link.isVirtual || link.circularLinkType !== 'top') continue;
+    if (!columns.has(link.source.column)) columns.set(link.source.column, []);
+    columns.get(link.source.column).push(link);
+  }
+  for (const links of columns.values()) {
+    if (links.some(l => l.source.column <= l.target.column || !l.circularPathData ||
+        l.circularPathData.sourcePortWrap || l.circularPathData.mirroredSourceRadius ||
+        l.circularPathData.localPortBridgeRadius || l.circularPathData.localForwardRadius ||
+        Math.abs(l.circularPathData.sourceX - links[0].circularPathData.sourceX) > 1e-6)) continue;
+    const targets = new Map();
+    for (const link of links) {
+      if (!targets.has(link.target)) targets.set(link.target, []);
+      targets.get(link.target).push(link);
+    }
+    if (targets.size < 2) continue;
+    const ordered = links.slice().sort((a, b) => a.circularPathData.rightFullExtent - b.circularPathData.rightFullExtent);
+    const runs = ordered.filter((l, i) => i === 0 || l.target !== ordered[i - 1].target);
+    if (runs.length === targets.size) continue;
+    const bundles = Array.from(targets.values());
+    bundles.forEach(group => group.sort((a, b) => b.circularPathData.verticalFullExtent - a.circularPathData.verticalFullExtent));
+    bundles.sort((a, b) => b[0].circularPathData.verticalFullExtent - a[0].circularPathData.verticalFullExtent);
+    const origin = links[0].circularPathData.sourceX + Math.max(...links.map(l => l.circularPathData.rightNodeBuffer || 0));
+    let radius, previous;
+    for (const link of bundles.flat()) {
+      const c = link.circularPathData, half = (link.width || 0) / 2;
+      radius = previous ? radius + ((previous.width || 0) + (link.width || 0)) / 2 + gap : baseRadius + half;
+      const small = Math.min(radius, Math.max(baseRadius + half, c.rightSmallArcRadius));
+      c.rightFullExtent = origin + radius;
+      c.rightLargeArcRadius = radius;
+      c.rightSmallArcRadius = c.rightSourceLargeArcRadius = small;
+      c.rightInnerExtent = c.rightShelfInnerExtent = origin;
+      c.rightDepartureInnerExtent = c.rightFullExtent - small;
+      c.verticalRightInnerExtent = c.verticalFullExtent + radius;
+      previous = link;
+    }
+  }
+}
+
+// A flattened arrival ellipse can pinch its inner stroke. Reserve a little
+// more shelf height for that whole target family, retaining round arrival
+// corners and the family's existing gaps. Outward pressure follows the
+// original shelf order so neighboring frames cannot be crossed by the repair.
+export function roundPinchedTopArrivals(graph, gap, baseRadius = 5) {
+  const top = graph.links.filter(l => l.circular && !l.isVirtual && l.circularLinkType === 'top' && l.circularPathData);
+  const oldShelf = new Map(top.map(l => [l, l.circularPathData.verticalFullExtent]));
+  const groups = new Map();
+  const simple = link => {
+    const c = link.circularPathData;
+    return !c.sourcePortWrap && !c.mirroredSourceRadius && !c.leftShelfArcRadius &&
+      !c.localPortBridgeRadius && !c.localForwardRadius && !c.localDownwardRadius;
+  };
+  for (const link of top) {
+    if (!simple(link)) continue;
+    const key = link.source === link.target ? link : link.target;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(link);
+  }
+  const half = l => (l.width || 0) / 2;
+  const overlaps = (a, b) => {
+    const ac = a.circularPathData, bc = b.circularPathData;
+    return Math.min(ac.rightShelfInnerExtent ?? ac.rightInnerExtent, bc.rightShelfInnerExtent ?? bc.rightInnerExtent) >
+      Math.max(ac.leftInnerExtent, bc.leftInnerExtent);
+  };
+  const frames = Array.from(groups.values()).sort((a, b) =>
+    Math.max(...b.map(l => oldShelf.get(l))) - Math.max(...a.map(l => oldShelf.get(l))));
+  for (const group of frames) {
+    let round = group.length > 1 && group.every(l => l.source !== l.target) && group.some(l => {
+      const c = l.circularPathData;
+      return c.leftSmallArcRadius * c.leftSmallArcRadius / c.leftLargeArcRadius < baseRadius + half(l) - 1e-5;
+    });
+    let shift = 0;
+    if (round) for (const link of group) {
+      const c = link.circularPathData;
+      shift = Math.min(shift, c.targetY - 2 * c.leftLargeArcRadius - c.verticalFullExtent);
+    }
+    // A special route's shelf is fixed by its own routing model. Do not pull
+    // a family through it in order to obtain a round corner.
+    if (round && top.some(other => !simple(other) && group.some(link =>
+      overlaps(link, other) && oldShelf.get(other) < oldShelf.get(link) &&
+      oldShelf.get(link) + shift < oldShelf.get(other) + half(other) + half(link) + gap))) {
+      round = false; shift = 0;
+    }
+    if (round) for (const link of group) link.circularPathData.leftSmallArcRadius = link.circularPathData.leftLargeArcRadius;
+    for (const link of group) {
+      const c = link.circularPathData;
+      // Source-slot regrouping can enlarge a turn independently of rounding.
+      shift = Math.min(shift, c.sourceY - c.rightSmallArcRadius - c.rightLargeArcRadius - c.verticalFullExtent);
+      for (const other of top) {
+        if (group.includes(other) || !overlaps(link, other) || oldShelf.get(other) <= oldShelf.get(link) + 1e-5) continue;
+        shift = Math.min(shift, other.circularPathData.verticalFullExtent - half(other) - half(link) - gap - c.verticalFullExtent);
+      }
+    }
+    if (!(shift < -1e-5)) continue;
+    for (const link of group) {
+      const c = link.circularPathData;
+      c.verticalFullExtent += shift;
+      c.verticalLeftInnerExtent += shift;
+      c.verticalRightInnerExtent += shift;
+      if (Number.isFinite(c.verticalBuffer)) c.verticalBuffer -= shift;
+    }
+  }
+}

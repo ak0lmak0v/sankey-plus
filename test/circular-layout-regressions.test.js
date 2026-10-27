@@ -659,3 +659,61 @@ for (const width of [1200, 1500, 2000]) test('top shelf moves propagate through 
   assert.ok(minDistance(samplePath(earlier[0].path, 220), samplePath(earlier[1].path, 220)) + 0.3 >=
     (earlier[0].width + earlier[1].width) / 2, 'Moving a whole earlier-column bundle must retain its full-route clearance');
 });
+
+for (const width of [1500, 1800, 2400]) test('top return source legs keep target families together at width ' + width, () => {
+  const data = neighboringReturnTargets();
+  for (const link of data.links)
+    if (link.source.startsWith('turn') && ['near', 'cap'].includes(link.target))
+      link._forceCircularLinkType = 'top';
+  const chart = new SankeyChart({id: n => n.name, align: 'left', width, height: 1000,
+    padding: 25, scale: 0.3, iterations: 10,
+    nodes: {data: data.nodes, width: 15, padding: 25, minPadding: 30,
+      virtualPadding: 7, horizontalSort: true, verticalSort: true},
+    links: {data: data.links, circularGap: 1, baseRadius: 5, verticalMargin: 100,
+      sortIterations: 12, postSortIterations: 4}, arrows: {enabled: false}});
+  chart.process();
+  const returns = chart.graph.links.filter(l => l.circular && !l.isVirtual &&
+    l.circularLinkType === 'top' && l.source.name.startsWith('turn'))
+    .sort((a, b) => a.circularPathData.rightFullExtent - b.circularPathData.rightFullExtent);
+  assert.equal(returns.length, 6);
+  const runs = returns.filter((l, i) => i === 0 || l.target !== returns[i - 1].target);
+  assert.equal(runs.length, 2, 'Per-node source passes must not interleave whole target families');
+  for (let i = 1; i < returns.length; i++) {
+    const a = returns[i - 1], b = returns[i];
+    close(b.circularPathData.rightFullExtent - a.circularPathData.rightFullExtent -
+      (a.width + b.width) / 2, 1, 'No empty right-leg slot may remain inside or between families');
+  }
+  for (const link of returns) {
+    const c = link.circularPathData;
+    assert.ok(c.rightDepartureInnerExtent >= c.sourceX, 'A compacted return must leave the right side of its source');
+    assertRoundRoute(link);
+    assert.ok(c.verticalRightInnerExtent <= c.sourceY - c.rightSmallArcRadius + 1e-6);
+    for (const other of returns.filter(l => l !== link && l.target === link.target))
+      assert.ok(minDistance(samplePath(link.path, 220), samplePath(other.path, 220)) + 0.3 >=
+        (link.width + other.width) / 2, 'Full routes inside a packed source family must remain separate');
+  }
+});
+
+for (const width of [1200, 1500, 2000]) test('pinched top arrivals reserve height for round turns at width ' + width, () => {
+  const data = topReturnShelfGraph();
+  data.links = data.links.filter(l => !(l.source === 'local' && l.target === 'cap'));
+  data.links.push({source: 'target', target: 'local', value: 13, _forceCircularLinkType: 'top'});
+  const chart = new SankeyChart({id: n => n.name, align: 'left', width, height: 1000,
+    padding: 25, scale: 0.005, iterations: 10,
+    nodes: {data: data.nodes, width: 15, padding: 25, minPadding: 30,
+      virtualPadding: 7, horizontalSort: true, verticalSort: true},
+    links: {data: data.links, circularGap: 1, baseRadius: 5, verticalMargin: 100,
+      sortIterations: 12, postSortIterations: 4}, arrows: {enabled: false}});
+  chart.process();
+  const group = chart.graph.links.filter(l => l.circular && !l.isVirtual && l.target.name === 'target');
+  assert.equal(group.length, 3);
+  for (const link of group) {
+    const c = link.circularPathData;
+    assert.ok(link.width > 0, 'Exercise real positive-width strokes');
+    close(c.leftSmallArcRadius, c.leftLargeArcRadius, 'Reserve shelf height instead of flattening the arrival arc');
+    assert.ok(c.verticalLeftInnerExtent <= c.targetY - c.leftSmallArcRadius + 1e-6, 'Round arrivals need a nonnegative target leg');
+    for (const other of group.filter(l => l !== link))
+      assert.ok(minDistance(samplePath(link.path, 220), samplePath(other.path, 220)) + 0.3 >=
+        (link.width + other.width) / 2, 'Rounding a pinched family must retain full-route clearance');
+  }
+});
