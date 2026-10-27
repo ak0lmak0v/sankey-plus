@@ -3270,7 +3270,7 @@ class SankeyChart {
       linkLabels.each(function(d) {
         let painted = false;
         select(this).selectAll("text").each(function() {
-          const visible = commentedAnchors.has(this) || (visibleLinks.has(d) && labelModes.get(this));
+          const visible = visibleLinks.has(d) && (labelModes.get(this) || commentedAnchors.has(this));
           this.style.opacity = visible ? "1" : "0";
           this.style.pointerEvents = visible ? "visiblePainted" : "none";
           painted ||= !!visible;

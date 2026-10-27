@@ -114,19 +114,23 @@ test('existing node comment keeps its native highlight and suppresses a new quot
   assert.equal(label.parentElement.querySelector('rect').style.opacity, '1');
 });
 
-test('existing link comment remains painted at rest and blocks a new quote at either endpoint', t => {
+test('existing link comment follows chart focus and blocks a new quote at either endpoint', t => {
   const {doc, dom, chart, click, annotate, poll} = fixture(t, true);
   const link = chart.graph.links.find(l => l.source.name === 'origin');
   const text = doc.getElementById(`chart-link-${link.index}-target-percent`);
   const path = [...doc.querySelectorAll('.sankey-link')].find(e => e.__data__ === link);
   annotate(text); poll();
+  assert.equal(text.style.opacity, '0', 'Comments must not force percentages into an idle chart');
+  assert.equal(text.parentElement.style.opacity, '0');
+  assert.equal(text.style.pointerEvents, 'none');
+  click(path);
   assert.equal(text.style.opacity, '1');
   assert.equal(text.parentElement.style.opacity, '1');
   assert.equal(text.style.pointerEvents, 'visiblePainted');
-  click(path);
   assert.equal(dom.window.getSelection().toString(), '', 'A comment on either label belongs to the entire link');
   click(doc.querySelector('svg'));
-  assert.equal(text.style.opacity, '1', 'Dismissal must not hide annotated percentages');
+  assert.equal(text.style.opacity, '0', 'Dismissal hides percentages even when they have comments');
+  click(path);
   click(text);
   assert.equal(dom.window.getSelection().toString(), '');
   assert.equal(path.style.strokeOpacity, String(chart.config.links.opacity));
@@ -289,4 +293,20 @@ test('focusing an existing comment never overwrites the clipboard', t => {
   Object.defineProperty(dom.window.navigator, 'clipboard', {value: {writeText: () => { writes++; }}});
   annotate(doc.getElementById('chart-node-label-target'), 'display-comment-anchor-focused-open'); poll();
   assert.equal(writes, 0);
+});
+
+
+test('commented percentage hides when an unrelated node is selected and returns for its comment', t => {
+  const {doc, chart, click, annotate, registry, poll} = fixture(t, true);
+  const link = chart.graph.links.find(l => l.source.name === 'origin');
+  const percent = doc.getElementById(`chart-link-${link.index}-target-percent`);
+  annotate(percent); poll();
+  click(doc.getElementById('chart-node-label-origin').parentElement.querySelector('rect'));
+  assert.equal(percent.style.opacity, '1');
+  click(doc.getElementById('chart-node-label-sink').parentElement.querySelector('rect'));
+  assert.equal(percent.style.opacity, '0');
+  assert.equal(percent.style.pointerEvents, 'none');
+  registry.clear(); annotate(percent, 'display-comment-anchor-focused-open'); poll();
+  assert.equal(percent.style.opacity, '1', 'Opening the comment restores its text and link emphasis');
+  assert.equal(percent.parentElement.style.opacity, '1');
 });
