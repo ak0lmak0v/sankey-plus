@@ -1,4 +1,4 @@
-import {preserveReturnBundleGroups, compactTopReturnShelves, groupTopSourceLegs, roundPinchedTopArrivals} from "./returnBundleGroups.js";
+import {preserveReturnBundleGroups, compactTopReturnShelves, groupTopSourceLegs, roundPinchedTopArrivals, clearForeignSourceSelfLoops} from "./returnBundleGroups.js";
 import {min, linkHorizontal} from "d3";
 
 import { selfLinking, onlyCircularLink } from "./linkAttributes.js";
@@ -7015,6 +7015,7 @@ export function addCircularPathData(
     compactTopReturnShelves(graph, circularLinkGap || 0, baseRadius);
     groupTopSourceLegs(graph, circularLinkGap || 0, baseRadius);
     roundPinchedTopArrivals(graph, circularLinkGap || 0, baseRadius);
+    clearForeignSourceSelfLoops(graph, circularLinkGap || 0);
   }
 
   graph.links.forEach(function(link) {

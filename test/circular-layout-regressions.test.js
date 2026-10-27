@@ -717,3 +717,36 @@ for (const width of [1200, 1500, 2000]) test('pinched top arrivals reserve heigh
         (link.width + other.width) / 2, 'Rounding a pinched family must retain full-route clearance');
   }
 });
+
+for (const width of [1200, 1800, 2400]) for (const mirrored of [false, true])
+test(`return source leg clears a foreign opposite-band self-loop at width ${width}, mirrored ${mirrored}`, () => {
+  // Independently chosen integer weights. The extra local loop is important:
+  // its source-slot compaction previously discarded another loop's clearance.
+  const nodes = [['upper', 0, 2], ['lower', 0, 1], ['anchor', 0, 0], ['sink', 1, 0]]
+    .map(([name, horizontalSort, verticalSort]) => ({name, horizontalSort,
+      verticalSort: mirrored ? -verticalSort : verticalSort}));
+  const side = band => mirrored ? (band === 'top' ? 'bottom' : 'top') : band;
+  const links = [['upper', 'upper', 7], ['upper', 'sink', 29],
+    ['anchor', 'anchor', 13], ['lower', 'upper', 5],
+    ['lower', 'lower', 11], ['lower', 'sink', 17]]
+    .map(([source, target, value]) => ({source, target, value,
+      ...(source === target ? {_forceCircularLinkType: side(source === 'anchor' ? 'top' : 'bottom')} :
+        source === 'lower' && target === 'upper' ? {_forceCircularLinkType: side('top')} : {})}));
+  const chart = new SankeyChart({id: n => n.name, align: 'left', width, height: 1000,
+    padding: 25, scale: 0.3, iterations: 10,
+    nodes: {data: nodes, width: 15, padding: 25, minPadding: 30,
+      virtualPadding: 7, horizontalSort: true, verticalSort: true},
+    links: {data: links, circularGap: 1, baseRadius: 5, verticalMargin: 100,
+      sortIterations: 12, postSortIterations: 4}, arrows: {enabled: false}});
+  chart.process();
+  const arrival = chart.graph.links.find(l => l.source.name === 'lower' && l.target.name === 'upper');
+  const loop = chart.graph.links.find(l => l.source.name === 'upper' && l.source === l.target);
+  assert.equal(arrival.circularLinkType, side('top'));
+  assert.equal(loop.circularLinkType, side('bottom'));
+  // Inspect the complete strokes, including the neighborhood of the shared
+  // target. Masking shared node ports hid precisely this regression.
+  assert.ok(minDistance(samplePath(arrival.path, 240), samplePath(loop.path, 240)) + 0.15 >=
+    (arrival.width + loop.width) / 2, 'The return leg overlaps a self-loop belonging to another source node');
+  assertRoundRoute(arrival);
+  assertRoundRoute(loop);
+});

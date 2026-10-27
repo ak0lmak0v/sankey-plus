@@ -322,3 +322,63 @@ export function roundPinchedTopArrivals(graph, gap, baseRadius = 5) {
     }
   }
 }
+
+// A source column can contain a return from one node and an opposite-band
+// self-loop from another. Preserve that fixed loop after all slot compaction;
+// extend the straight source stub instead of inflating or flattening its arcs.
+export function clearForeignSourceSelfLoops(graph, gap) {
+  const real = graph.links.filter(l => l.circular && !l.isVirtual && l.circularPathData);
+  const loops = real.filter(l => l.source === l.target);
+  const corridors = new Map();
+  for (const link of real) {
+    const c = link.circularPathData;
+    if (link.source === link.target || c.sourcePortWrap || c.mirroredSourceRadius ||
+        c.localPortBridgeRadius || c.localForwardRadius || c.localDownwardRadius) continue;
+    const key = link.source.column + '|' + link.circularLinkType;
+    if (!corridors.has(key)) corridors.set(key, []);
+    corridors.get(key).push(link);
+  }
+  const half = l => (l.width || 0) / 2;
+  const legRange = link => {
+    const c = link.circularPathData, sign = link.circularLinkType === 'bottom' ? 1 : -1;
+    const end = c.sourceY + sign * c.rightSmallArcRadius;
+    return [Math.min(end, c.verticalRightInnerExtent), Math.max(end, c.verticalRightInnerExtent)];
+  };
+  for (const links of corridors.values()) {
+    const moved = new Set();
+    links.sort((a, b) => a.circularPathData.rightFullExtent - b.circularPathData.rightFullExtent);
+    for (let i = 0; i < links.length; i++) {
+      const link = links[i], c = link.circularPathData, [y0, y1] = legRange(link);
+      let axis = c.rightFullExtent;
+      for (const loop of loops) {
+        if (loop.source === link.source || loop.source.column !== link.source.column ||
+            loop.circularLinkType === link.circularLinkType) continue;
+        const lc = loop.circularPathData, margin = half(loop) + half(link) + gap;
+        // Insets can put another node of the same column far to the right.
+        // A leg already outside that loop's left edge needs no right detour.
+        if (c.rightFullExtent <= lc.leftFullExtent - margin) continue;
+        if (y1 + margin < Math.min(lc.sourceY, lc.verticalFullExtent) ||
+            y0 - margin > Math.max(lc.sourceY, lc.verticalFullExtent)) continue;
+        axis = Math.max(axis, lc.rightFullExtent + margin);
+      }
+      // An inner lane can move outward to clear a loop. Carry that pressure
+      // into overlapping outer lanes so the repair cannot swap their order.
+      for (let j = 0; j < i; j++) {
+        const prev = links[j];
+        if (!moved.has(prev)) continue;
+        const [p0, p1] = legRange(prev);
+        const margin = half(prev) + half(link) + gap;
+        if (Math.min(y1, p1) + margin < Math.max(y0, p0)) continue;
+        axis = Math.max(axis, prev.circularPathData.rightFullExtent + margin);
+      }
+      const shift = axis - c.rightFullExtent;
+      if (!(shift > 1e-5)) continue;
+      c.rightDepartureInnerExtent = (c.rightDepartureInnerExtent ?? c.rightInnerExtent) + shift;
+      c.rightShelfInnerExtent = (c.rightShelfInnerExtent ?? c.rightInnerExtent) + shift;
+      c.rightInnerExtent += shift;
+      c.rightFullExtent = axis;
+      c.sourceStubExtended = true;
+      moved.add(link);
+    }
+  }
+}
