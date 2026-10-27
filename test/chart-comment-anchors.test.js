@@ -149,13 +149,13 @@ test('focusing a host node comment matches node click and preserves other annota
   const other = doc.getElementById('chart-node-label-sink');
   const opacities = () => [...doc.querySelectorAll('.sankey-link,.nodes rect')]
     .map(e => [e.style.strokeOpacity, e.style.opacity]);
-  click(target); const expected = opacities();
+  click(target.parentElement.querySelector('rect')); const expected = opacities();
   dom.window.getSelection().removeAllRanges(); click(doc.querySelector('svg'));
   annotate(other); annotate(target, 'display-comment-anchor-focused-open'); poll();
   assert.deepEqual(opacities(), expected);
   assert.equal(other.style.opacity, '1', 'Native comment highlighting must remain visible');
   registry.clear(); poll();
-  click(target);
+  click(target.parentElement.querySelector('rect'));
   assert.equal(dom.window.getSelection().toString(), 'origin', 'Without a comment, ordinary new-comment behavior returns');
 });
 
@@ -175,4 +175,44 @@ test('host highlight transfers do not change anchor text or recreate ranges', t 
   poll();
   assert.equal(doc.querySelectorAll('.sankey-commented').length, 0, 'Ignore detached ranges until the host reanchors them');
   chart._disposeLabelSelection(); assert.equal(polls.size, 0);
+});
+
+
+test('direct node text click reaches the host before any new selection or chart emphasis', async t => {
+  const {doc, dom, click} = fixture(t);
+  const label = doc.getElementById('chart-node-label-target');
+  let hostClick = false;
+  doc.addEventListener('click', event => {
+    if (event.target === label) {
+      hostClick = true;
+      assert.equal(dom.window.getSelection().isCollapsed, true,
+        'The native host ignores existing-comment clicks while a new quote is selected');
+      assert.equal(doc.querySelector('.sankey-link').style.strokeOpacity, '',
+        'Do not move or dim chart elements before native hit testing');
+    }
+  });
+  click(label);
+  assert.ok(hostClick, 'Text clicks must bubble even when host highlight inspection is unavailable');
+  await Promise.resolve();
+  assert.equal(dom.window.getSelection().toString(), '');
+  assert.equal(label.parentElement.querySelector('rect').style.opacity, '1');
+});
+
+test('percentage click keeps its original coordinates until the host handles the existing thread', async t => {
+  const {doc, chart, click, annotate, poll} = fixture(t, true);
+  const link = chart.graph.links.find(l => l.source.name === 'origin');
+  const label = doc.getElementById(`chart-link-${link.index}-target-percent`);
+  annotate(label); poll();
+  const y = label.getAttribute('y');
+  let delivered = false;
+  doc.addEventListener('click', event => {
+    if (event.target === label) {
+      delivered = true;
+      assert.equal(label.getAttribute('y'), y);
+      assert.equal(doc.querySelector('.sankey-link').style.strokeOpacity, '');
+    }
+  });
+  click(label); assert.ok(delivered);
+  await Promise.resolve();
+  assert.ok([...doc.querySelectorAll('.sankey-link')].some(e => e.style.strokeOpacity === '0.1'));
 });

@@ -3693,9 +3693,20 @@ class SankeyChart {
         });
       })
       .on("mouseup", function(event, d) {
+        // Let native annotation hit testing run on text clicks. Selecting the
+        // name here would make the host treat an existing thread as a new quote.
+        if (event.target.closest?.(".sankey-comment-anchor") === select(this).select("text").node()) {
+          cancelLabelChanges();
+          return;
+        }
         activateComment.call(this, event, d, onNodeEnter, () => select(this).select("text").node());
       })
       .on("click", function(event, d) {
+        const name = select(this).select("text").node();
+        if (event.target.closest?.(".sankey-comment-anchor") === name) {
+          focusAfterHostClick(event, name);
+          return;
+        }
         commentHighlights.refresh();
         if (!commentedAnchors.has(select(this).select("text").node())) event.stopPropagation();
         if (commentTarget !== this || !labelSelection.active())
@@ -3998,15 +4009,29 @@ class SankeyChart {
       labelSelection.hold();
       commentTarget = target;
     };
-    // Existing percentage annotations remain clickable even outside link hover.
+    const focusAfterHostClick = (event, anchor) => {
+      if (event.button != null && event.button !== 0) return;
+      commentHighlights.refresh();
+      const selection = svg.node().ownerDocument.defaultView?.getSelection?.();
+      // Preserve intentional drag selections for new comments.
+      if (!selection?.isCollapsed && !commentedAnchors.has(anchor)) return;
+      if (commentedAnchors.has(anchor)) clearChartSelection(svg.node());
+      cancelLabelChanges();
+      // The host looks up the Range at the original click coordinates. Apply
+      // chart emphasis only after its bubbling handler has opened the thread;
+      // link-hover label placement can otherwise move that Range too early.
+      queueMicrotask(() => {
+        if (!svg.node().isConnected) return;
+        commentFocusOwned = false;
+        focusAnchor(anchor);
+      });
+    };
     linkLabels.selectAll("text")
       .on("mouseup", function(event) {
-        commentHighlights.refresh();
-        if (commentedAnchors.has(this)) {
-          commentFocusOwned = false;
-          focusAnchor(this);
-        }
-      });
+        if (event.button != null && event.button !== 0) return;
+        cancelLabelChanges();
+      })
+      .on("click", function(event) { focusAfterHostClick(event, this); });
     commentHighlights = displayCommentHighlights(svg.node(), ({annotated, focused, focusChanged}) => {
       commentedAnchors = annotated;
       g.selectAll(".sankey-comment-anchor")
