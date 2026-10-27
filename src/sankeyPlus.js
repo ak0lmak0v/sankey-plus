@@ -1,3 +1,4 @@
+import {displayCommentHighlights, clearChartSelection} from "./displayCommentHighlights.js";
 import {linkLabelSelection, selectCommentText} from "./linkLabelSelection.js";
 import {prepareReturnSourceCorridors} from "./returnSourceCorridors.js";
 import { find } from "./find.js";
@@ -3254,23 +3255,47 @@ class SankeyChart {
       .style("user-select", "text")
       .style("-webkit-user-select", "text");
 
-    const showLinkLabels = visible => {
-      linkLabels
-        .style("opacity", l => (typeof visible === "function" ? visible(l) : visible) ? 1 : 0);
-      updateLabelHitTargets();
+    let commentedAnchors = new Set();
+    let commentHighlights = {refresh() {}, dispose() {}};
+    let commentFocusOwned = false;
+    const visibleLinks = new Set();
+    const labelModes = new WeakMap();
+    const preserveCommentedNames = () => {
+      for (const anchor of commentedAnchors)
+        if (!anchor.parentElement.classList.contains("link-label-group"))
+          anchor.style.opacity = "1";
     };
-    const updateLabelHitTargets = () => linkLabels.selectAll("text")
-      .style("pointer-events", function() {
-        return this.style.opacity === "1" && this.parentElement.style.opacity === "1" ? "visiblePainted" : "none";
+    const refreshLabelPaint = () => {
+      linkLabels.each(function(d) {
+        let painted = false;
+        select(this).selectAll("text").each(function() {
+          const visible = commentedAnchors.has(this) || (visibleLinks.has(d) && labelModes.get(this));
+          this.style.opacity = visible ? "1" : "0";
+          this.style.pointerEvents = visible ? "visiblePainted" : "none";
+          painted ||= !!visible;
+        });
+        this.style.opacity = painted ? "1" : "0";
       });
+      preserveCommentedNames();
+    };
+    const showLinkLabels = visible => {
+      visibleLinks.clear();
+      linkLabels.each(l => {
+        if (typeof visible === "function" ? visible(l) : visible) visibleLinks.add(l);
+      });
+      refreshLabelPaint();
+    };
     // Keep anchor text in the DOM, even when a label is not currently painted.
     // Replacing textContent or using visibility:hidden invalidates host quotes.
     const setLabelMode = (mode, hoveredNode) => {
       for (const position of ["source", "target", "self"])
-        linkLabels.select(`.link-label-${position}`)
-          .style("opacity", l => _linkLabelText(l, position, mode, hoveredNode) ? 1 : 0);
-      updateLabelHitTargets();
+        linkLabels.select(`.link-label-${position}`).each(function(l) {
+          labelModes.set(this, !!_linkLabelText(l, position, mode, hoveredNode));
+        });
+      refreshLabelPaint();
     };
+    const linkHasComment = link => [...commentedAnchors].some(anchor =>
+      anchor.parentElement.classList.contains("link-label-group") && anchor.__data__ === link);
 
     // Avoid flicker on node mouseleave:
     // We fade labels out (opacity transition) and only THEN reset their text/anchor positions.
@@ -3383,6 +3408,7 @@ class SankeyChart {
     const labelSelection = linkLabelSelection(svg.node(), linkLabelsG.node(),
       () => { hoverLocked = true; }, cancelLabelChanges);
     const onDocumentClick = event => {
+      if (commentTarget && (commentTarget === event.target || commentTarget.contains(event.target)) && labelSelection.active()) return;
       if (labelSelection.keepOnClick(event)) return;
       labelSelection.release();
       if (hoverLocked) {
@@ -3394,6 +3420,7 @@ class SankeyChart {
     this._disposeLabelSelection = () => {
       cancelLabelChanges();
       labelSelection.dispose();
+      commentHighlights.dispose();
       svg.node().ownerDocument.removeEventListener("click", onDocumentClick);
     };
 
@@ -3405,12 +3432,17 @@ class SankeyChart {
       .node();
     const activateComment = function(event, data, enter, text) {
       if (event.button != null && event.button !== 0) return;
+      commentHighlights.refresh();
+      commentFocusOwned = false;
       labelSelection.release();
       enter.call(this, event, data);
       cancelLabelChanges();
       lockedHoverCallback?.();
       hoverLocked = true;
-      if (selectCommentText(text())) {
+      const anchor = text();
+      const existing = commentedAnchors.has(anchor) || linkHasComment(data);
+      if (existing) clearChartSelection(svg.node());
+      if (existing || selectCommentText(anchor)) {
         labelSelection.hold();
         commentTarget = this;
       }
@@ -3664,7 +3696,8 @@ class SankeyChart {
         activateComment.call(this, event, d, onNodeEnter, () => select(this).select("text").node());
       })
       .on("click", function(event, d) {
-        event.stopPropagation();
+        commentHighlights.refresh();
+        if (!commentedAnchors.has(select(this).select("text").node())) event.stopPropagation();
         if (commentTarget !== this || !labelSelection.active())
           activateComment.call(this, event, d, onNodeEnter, () => select(this).select("text").node());
       });
@@ -3759,6 +3792,7 @@ class SankeyChart {
             })
             .selectAll("text")
             .style("opacity", 1);
+          preserveCommentedNames();
         });
       };
 
@@ -3785,7 +3819,8 @@ class SankeyChart {
         activateComment.call(this, event, d, onLinkEnter, () => percentageFor(d));
       })
       .on("click", function(event, d) {
-        event.stopPropagation();
+        commentHighlights.refresh();
+        if (!linkHasComment(d)) event.stopPropagation();
         if (commentTarget !== this || !labelSelection.active())
           activateComment.call(this, event, d, onLinkEnter, () => percentageFor(d));
       })
@@ -3947,6 +3982,49 @@ class SankeyChart {
           .style("fill", arrowColor);
       });
     }
+
+    const focusAnchor = anchor => {
+      const isLink = anchor.parentElement.classList.contains("link-label-group");
+      const data = select(anchor).datum();
+      const target = isLink
+        ? g.selectAll(".sankey-link").filter(l => l === data).node()
+        : anchor.parentElement;
+      if (!target) return;
+      labelSelection.release();
+      (isLink ? onLinkEnter : onNodeEnter).call(target, {}, data);
+      cancelLabelChanges();
+      lockedHoverCallback?.();
+      clearChartSelection(svg.node());
+      labelSelection.hold();
+      commentTarget = target;
+    };
+    // Existing percentage annotations remain clickable even outside link hover.
+    linkLabels.selectAll("text")
+      .on("mouseup", function(event) {
+        commentHighlights.refresh();
+        if (commentedAnchors.has(this)) {
+          commentFocusOwned = false;
+          focusAnchor(this);
+        }
+      });
+    commentHighlights = displayCommentHighlights(svg.node(), ({annotated, focused, focusChanged}) => {
+      commentedAnchors = annotated;
+      g.selectAll(".sankey-comment-anchor")
+        .classed("sankey-commented", function() { return annotated.has(this); });
+      if (focusChanged) {
+        if (focused) {
+          focusAnchor(focused);
+          commentFocusOwned = true;
+        } else if (commentFocusOwned) {
+          commentFocusOwned = false;
+          cancelLabelChanges();
+          labelSelection.release();
+          unlockHover();
+          restoreAllToDefault();
+        }
+      }
+      refreshLabelPaint();
+    });
 
     // Percentages must stay above ribbons for hit testing and native text selection.
     linkLabelsG.raise();

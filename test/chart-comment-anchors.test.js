@@ -4,9 +4,16 @@ const {JSDOM} = require('jsdom');
 globalThis.self = globalThis;
 const {SankeyChart} = require('../dist/sankeyPlus.js');
 
-function fixture(t) {
+function fixture(t, highlights = false) {
   const dom = new JSDOM('<!DOCTYPE html><body><div id="chart"></div><button id="comments">Comments</button></body>',
     {pretendToBeVisual: true});
+  const registry = new Map(), polls = new Map();
+  let nextPoll = 0;
+  if (highlights) {
+    Object.defineProperty(dom.window, 'CSS', {value: {highlights: registry}});
+    dom.window.setInterval = callback => { polls.set(++nextPoll, callback); return nextPoll; };
+    dom.window.clearInterval = id => polls.delete(id);
+  }
   const previous = {window: globalThis.window, document: globalThis.document};
   globalThis.window = dom.window;
   globalThis.document = dom.window.document;
@@ -22,7 +29,13 @@ function fixture(t) {
   const event = (element, type) => element.dispatchEvent(new dom.window.MouseEvent(type, {bubbles: true, button: 0}));
   const click = element => { event(element, 'mouseup'); event(element, 'click'); };
   t.after(() => { chart._disposeLabelSelection(); dom.window.close(); Object.assign(globalThis, previous); });
-  return {chart, doc, dom, event, click};
+  const annotate = (element, name = 'display-comment-anchor') => {
+    const range = doc.createRange(); range.selectNodeContents(element);
+    registry.set(name, new Set([range]));
+    return range;
+  };
+  const poll = () => { for (const callback of [...polls.values()]) callback(); };
+  return {chart, doc, dom, event, click, registry, annotate, poll, polls};
 }
 
 test('node click exposes a real quote before document mouseup and keeps it on click', t => {
@@ -79,4 +92,87 @@ test('accessible descriptions do not add invisible duplicate node names and valu
     'Hidden SVG title text makes short quotes resolve to an invisible duplicate');
   assert.equal(doc.querySelector('#chart-node-label-target').parentElement.getAttribute('aria-label'), 'target');
   assert.ok([...doc.querySelectorAll('.links g')].every(e => /Value:/.test(e.getAttribute('aria-label'))));
+});
+
+
+test('existing node comment keeps its native highlight and suppresses a new quote', t => {
+  const {doc, dom, click, annotate, poll} = fixture(t, true);
+  const label = doc.getElementById('chart-node-label-target');
+  annotate(label); poll();
+  assert.ok(label.classList.contains('sankey-commented'));
+  let delivered = 0;
+  doc.addEventListener('click', () => delivered++);
+  click(label);
+  assert.equal(dom.window.getSelection().toString(), '', 'No selection means no duplicate host Comment pill');
+  assert.equal(delivered, 1, 'Keep the native existing-thread click available to the host');
+  assert.equal(label.parentElement.querySelector('rect').style.opacity, '1');
+});
+
+test('existing link comment remains painted at rest and blocks a new quote at either endpoint', t => {
+  const {doc, dom, chart, click, annotate, poll} = fixture(t, true);
+  const link = chart.graph.links.find(l => l.source.name === 'origin');
+  const text = doc.getElementById(`chart-link-${link.index}-target-percent`);
+  const path = [...doc.querySelectorAll('.sankey-link')].find(e => e.__data__ === link);
+  annotate(text); poll();
+  assert.equal(text.style.opacity, '1');
+  assert.equal(text.parentElement.style.opacity, '1');
+  assert.equal(text.style.pointerEvents, 'visiblePainted');
+  click(path);
+  assert.equal(dom.window.getSelection().toString(), '', 'A comment on either label belongs to the entire link');
+  click(doc.querySelector('svg'));
+  assert.equal(text.style.opacity, '1', 'Dismissal must not hide annotated percentages');
+  click(text);
+  assert.equal(dom.window.getSelection().toString(), '');
+  assert.equal(path.style.strokeOpacity, String(chart.config.links.opacity));
+});
+
+test('focusing a host link comment applies the same emphasis as clicking its ribbon', t => {
+  const {doc, dom, chart, click, annotate, registry, poll} = fixture(t, true);
+  const link = chart.graph.links.find(l => l.source.name === 'origin');
+  const path = [...doc.querySelectorAll('.sankey-link')].find(e => e.__data__ === link);
+  const text = doc.getElementById(`chart-link-${link.index}-target-percent`);
+  const opacities = () => [...doc.querySelectorAll('.sankey-link,.nodes rect')]
+    .map(e => [e.style.strokeOpacity, e.style.opacity]);
+  click(path);
+  const expected = opacities();
+  dom.window.getSelection().removeAllRanges(); click(doc.querySelector('svg'));
+  annotate(text, 'display-comment-anchor-focused-open'); poll();
+  assert.deepEqual(opacities(), expected);
+  assert.equal(dom.window.getSelection().toString(), '', 'Opening an existing thread must not offer a new comment');
+  registry.clear(); poll();
+  assert.ok([...doc.querySelectorAll('.sankey-link')].every(e => e.style.strokeOpacity === String(chart.config.links.opacity)));
+});
+
+test('focusing a host node comment matches node click and preserves other annotated names', t => {
+  const {doc, dom, click, annotate, registry, poll} = fixture(t, true);
+  const target = doc.getElementById('chart-node-label-origin');
+  const other = doc.getElementById('chart-node-label-sink');
+  const opacities = () => [...doc.querySelectorAll('.sankey-link,.nodes rect')]
+    .map(e => [e.style.strokeOpacity, e.style.opacity]);
+  click(target); const expected = opacities();
+  dom.window.getSelection().removeAllRanges(); click(doc.querySelector('svg'));
+  annotate(other); annotate(target, 'display-comment-anchor-focused-open'); poll();
+  assert.deepEqual(opacities(), expected);
+  assert.equal(other.style.opacity, '1', 'Native comment highlighting must remain visible');
+  registry.clear(); poll();
+  click(target);
+  assert.equal(dom.window.getSelection().toString(), 'origin', 'Without a comment, ordinary new-comment behavior returns');
+});
+
+test('host highlight transfers do not change anchor text or recreate ranges', t => {
+  const {doc, chart, annotate, registry, poll, polls} = fixture(t, true);
+  const label = doc.getElementById('chart-node-label-target');
+  const textNode = label.firstChild, context = doc.body.textContent;
+  const range = annotate(label); poll();
+  registry.clear(); registry.set('display-comment-anchor-hover-open', new Set([range])); poll();
+  assert.ok(label.classList.contains('sankey-commented'));
+  registry.clear(); registry.set('display-comment-anchor-focused-open', new Set([range])); poll();
+  assert.equal(label.firstChild, textNode);
+  assert.equal(range.startContainer, label);
+  assert.equal(doc.body.textContent, context);
+  chart.draw('chart');
+  assert.equal(polls.size, 1, 'Redraw must dispose the previous registry poller');
+  poll();
+  assert.equal(doc.querySelectorAll('.sankey-commented').length, 0, 'Ignore detached ranges until the host reanchors them');
+  chart._disposeLabelSelection(); assert.equal(polls.size, 0);
 });
