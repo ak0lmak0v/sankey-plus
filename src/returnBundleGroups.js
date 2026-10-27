@@ -20,8 +20,20 @@ export function preserveReturnBundleGroups(graph, gap, baseRadius = 5) {
   }
   const half = link => Math.max(link.width || 0, 1) / 2;
   for (const bundles of bySource.values()) {
-    if (bundles.length < 2) continue;
     const members = bundles.flat();
+    // A corridor with only one target still needs its obsolete source slots
+    // reclaimed. Specialized and staggered departures keep their own frames.
+    const singleFamily = bundles.length === 1;
+    if (singleFamily && members.some(l => l.target !== members[0].target ||
+        l.circularPathData.sourcePortWrap || l.circularPathData.mirroredSourceRadius ||
+        l.circularPathData.localPortBridgeRadius || l.circularPathData.localForwardRadius ||
+        l.circularPathData.localDownwardRadius ||
+        Math.abs(l.circularPathData.sourceX - members[0].circularPathData.sourceX) > 1e-6)) continue;
+    if (singleFamily) {
+      const ordered = members.slice().sort((a, b) => a.circularPathData.rightFullExtent - b.circularPathData.rightFullExtent);
+      if (ordered.slice(1).every((l, i) => l.circularPathData.rightFullExtent -
+          ordered[i].circularPathData.rightFullExtent - half(l) - half(ordered[i]) <= gap + 1e-5)) continue;
+    }
     const runCount = coordinate => {
       const ordered = members.slice().sort((a, b) => coordinate(a) - coordinate(b));
       const runs = [];
@@ -29,7 +41,7 @@ export function preserveReturnBundleGroups(graph, gap, baseRadius = 5) {
         if (runs.at(-1) !== link.target.column) runs.push(link.target.column);
       return runs.length;
     };
-    if (runCount(l => l.circularPathData.verticalFullExtent) === bundles.length &&
+    if (!singleFamily && runCount(l => l.circularPathData.verticalFullExtent) === bundles.length &&
         runCount(l => l.circularPathData.rightFullExtent) === bundles.length) continue;
     // Same origin column: nearer target columns form the inner bundles,
     // matching calcVerticalBuffer's initial target-column order.

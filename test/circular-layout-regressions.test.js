@@ -750,3 +750,42 @@ test(`return source leg clears a foreign opposite-band self-loop at width ${widt
   assertRoundRoute(arrival);
   assertRoundRoute(loop);
 });
+
+for (const width of [1200, 1800, 2400])
+test('a lone bottom target family has no vacant source slots at width ' + width, () => {
+  // A top return consumes a source turn slot. That slot must not remain in
+  // the bottom family when no second bottom destination triggers regrouping.
+  const nodes = [['target', 0, -1], ['cap', 0, 1], ['lower', 1, -2], ['upper', 1, -1]]
+    .map(([name, horizontalSort, verticalSort]) => ({name, horizontalSort, verticalSort}));
+  const links = [['upper', 'target', 7, 'bottom'], ['lower', 'cap', 13, 'top'],
+    ['lower', 'target', 11, 'bottom'], ['target', 'lower', 17], ['cap', 'upper', 19]]
+    .map(([source, target, value, band]) => ({source, target, value,
+      ...(band ? {_forceCircularLinkType: band} : {})}));
+  const chart = new SankeyChart({id: n => n.name, align: 'left', width, height: 1000,
+    padding: 25, scale: 0.3, iterations: 10,
+    nodes: {data: nodes, width: 15, padding: 25, minPadding: 30,
+      virtualPadding: 7, horizontalSort: true, verticalSort: true},
+    links: {data: links, circularGap: 1, baseRadius: 5, verticalMargin: 100,
+      circularLinkPortionTopBottom: 1, circularLinkPortionLeftRight: 0.1,
+      useVirtualRoutes: true, horizontalMargin: 60, sortIterations: 12, postSortIterations: 4},
+    arrows: {enabled: false}});
+  chart.process();
+  const group = chart.graph.links.filter(l => l.circular && !l.isVirtual && l.target.name === 'target')
+    .sort((a, b) => a.circularPathData.rightFullExtent - b.circularPathData.rightFullExtent);
+  assert.equal(group.length, 2);
+  assert.ok(group.every(l => l.circularLinkType === 'bottom'));
+  const [inner, outer] = group;
+  close(outer.circularPathData.rightFullExtent - inner.circularPathData.rightFullExtent -
+    (inner.width + outer.width) / 2, 1, 'A lone family must reclaim unused source slots');
+  assert.ok(minDistance(samplePath(inner.path, 240), samplePath(outer.path, 240)) + 0.15 >=
+    (inner.width + outer.width) / 2, 'Regrouping must retain complete-route separation');
+  for (const link of group) {
+    assertRoundRoute(link);
+    assert.ok(!/NaN|Infinity/.test(link.path));
+    for (const node of chart.graph.nodes.filter(n => !n.virtual && n !== link.source && n !== link.target)) {
+      const distance = Math.min(...samplePath(link.path, 240).map(([x, y]) => Math.hypot(
+        Math.max(node.x0 - x, 0, x - node.x1), Math.max(node.y0 - y, 0, y - node.y1))));
+      assert.ok(distance + 0.15 >= link.width / 2, 'Grouped source turns must clear other node bodies');
+    }
+  }
+});
