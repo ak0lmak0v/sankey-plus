@@ -222,3 +222,23 @@ test('percentage click keeps its original coordinates until the host handles the
   await Promise.resolve();
   assert.ok([...doc.querySelectorAll('.sankey-link')].some(e => e.style.strokeOpacity === '0.1'));
 });
+
+
+test('uncommented text still offers a new quote after native click handling', async t => {
+  const {doc, dom, click} = fixture(t, true);
+  const label = doc.getElementById('chart-node-label-target');
+  click(label);
+  assert.equal(dom.window.getSelection().toString(), '');
+  await Promise.resolve();
+  assert.equal(dom.window.getSelection().toString(), 'target');
+});
+
+test('a comment on the other percentage endpoint also suppresses duplicate text selection', async t => {
+  const {doc, dom, chart, click, annotate, poll} = fixture(t, true);
+  const link = chart.graph.links.find(l => l.source.name === 'origin');
+  const source = doc.getElementById(`chart-link-${link.index}-source-percent`);
+  const target = doc.getElementById(`chart-link-${link.index}-target-percent`);
+  annotate(target); poll();
+  click(source); await Promise.resolve();
+  assert.equal(dom.window.getSelection().toString(), '');
+});

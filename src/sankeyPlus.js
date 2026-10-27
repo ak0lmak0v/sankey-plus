@@ -4013,9 +4013,10 @@ class SankeyChart {
       if (event.button != null && event.button !== 0) return;
       commentHighlights.refresh();
       const selection = svg.node().ownerDocument.defaultView?.getSelection?.();
+      const hasComment = commentedAnchors.has(anchor) || linkHasComment(select(anchor).datum());
       // Preserve intentional drag selections for new comments.
-      if (!selection?.isCollapsed && !commentedAnchors.has(anchor)) return;
-      if (commentedAnchors.has(anchor)) clearChartSelection(svg.node());
+      if (!selection?.isCollapsed && !hasComment) return;
+      if (hasComment) clearChartSelection(svg.node());
       cancelLabelChanges();
       // The host looks up the Range at the original click coordinates. Apply
       // chart emphasis only after its bubbling handler has opened the thread;
@@ -4024,6 +4025,10 @@ class SankeyChart {
         if (!svg.node().isConnected) return;
         commentFocusOwned = false;
         focusAnchor(anchor);
+        // On supported hosts, uncommented text still offers the new-comment
+        // action. Existing annotations anywhere on this link take precedence.
+        if (!hasComment && svg.node().getAttribute("data-comment-highlights") === "available")
+          selectCommentText(anchor);
       });
     };
     linkLabels.selectAll("text")
