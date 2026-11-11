@@ -4077,42 +4077,31 @@ class SankeyChart {
     // Percentages must stay above ribbons for hit testing and native text selection.
     linkLabelsG.raise();
 
-    // Post-render vertical centering / fit:
-    // Some circular links extend beyond graph.y0/y1 (their control points live outside),
-    // and SVG will clip them if they extend beyond the viewport. We fix this WITHOUT
-    // changing the layout by translating the whole content group in Y so that:
-    // - if content height <= svg height: content is vertically centered
-    // - otherwise: best-effort shift to keep as much visible as possible
-    try {
-      const svgH = this.config.height;
-      const node = g.node && g.node();
-      if (node && typeof node.getBBox === "function" && Number.isFinite(svgH) && svgH > 0) {
-        const bb = node.getBBox();
-        const contentH = bb.height;
-        if (Number.isFinite(contentH) && contentH > 0 && Number.isFinite(bb.y)) {
-          // Desired top position for vertical centering
-          const desiredShift = (svgH - contentH) / 2 - bb.y;
-
-          // Clamp shift so the content stays within [0, svgH] when possible.
-          const minShift = -bb.y; // top at 0
-          const maxShift = svgH - (bb.y + contentH); // bottom at svgH
-          let shiftY = desiredShift;
-          if (Number.isFinite(minShift) && Number.isFinite(maxShift)) {
-            if (minShift <= maxShift) {
-              shiftY = Math.max(minShift, Math.min(desiredShift, maxShift));
-            } else {
-              // Content taller than viewport; can't satisfy both. Keep top visible.
-              shiftY = minShift;
-            }
-          }
-
-          if (Number.isFinite(shiftY) && Math.abs(shiftY) > 0.5) {
-            g.attr("transform", `translate(0,${shiftY})`);
+    // Fit the painted graph at its original scale. The group bounds are
+    // measured before translation and getBBox() excludes the stroke.
+    const layer = g.node();
+    if (typeof layer.getBBox === "function") {
+      try {
+        const {width, height} = this.config;
+        const box = layer.getBBox();
+        if ([box.x, box.y, box.width, box.height, width, height].every(Number.isFinite) &&
+            box.width > 0 && box.height > 0 && width > 0 && height > 0) {
+          const strokePadding = linksForDraw.reduce((padding, link) =>
+            Math.max(padding, (link.width || 0) / 2), 0.5);
+          const left = Math.floor(Math.min(0, box.x - strokePadding));
+          const right = Math.ceil(Math.max(width, box.x + box.width + strokePadding));
+          const viewportWidth = right - left;
+          const viewportHeight = Math.max(height, Math.ceil(box.height + 2 * strokePadding));
+          const shiftY = (viewportHeight - box.height) / 2 - box.y;
+          g.attr("transform", `translate(0,${shiftY})`);
+          if (left !== 0 || viewportWidth !== width || viewportHeight !== height) {
+            svg.attr("width", viewportWidth).attr("height", viewportHeight)
+              .attr("viewBox", `${left} 0 ${viewportWidth} ${viewportHeight}`);
           }
         }
+      } catch (error) {
+        // An SVG mounted in a hidden container may not have a measurable box.
       }
-    } catch (e) {
-      // ignore centering errors (e.g. getBBox not supported)
     }
   }
 } // End of draw()

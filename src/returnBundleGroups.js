@@ -2,24 +2,18 @@
 // A shared source column can return to several target columns. Compacting those
 // columns independently must not turn their bundles into alternating shelves.
 export function preserveReturnBundleGroups(graph, gap, baseRadius = 5) {
-  const byTarget = new Map();
+  const bySource = new Map();
   for (const link of graph.links) {
     if (!link.circular || link.isVirtual || link.circularLinkType !== 'bottom' ||
         !link.circularPathData || link.source.column <= link.target.column) continue;
-    if (!byTarget.has(link.target.column)) byTarget.set(link.target.column, []);
-    byTarget.get(link.target.column).push(link);
-  }
-  const bySource = new Map();
-  for (const links of byTarget.values()) {
-    const source = links[0].source.column;
-    // Multi-column source corridors have their own nesting constraints. Keep
-    // this consolidation to whole bundles sharing a single source column.
-    if (links.length < 2 || links.some(link => link.source.column !== source)) continue;
-    if (!bySource.has(source)) bySource.set(source, []);
-    bySource.get(source).push(links);
+    if (!bySource.has(link.source.column)) bySource.set(link.source.column, new Map());
+    const targets = bySource.get(link.source.column);
+    if (!targets.has(link.target)) targets.set(link.target, []);
+    targets.get(link.target).push(link);
   }
   const half = link => Math.max(link.width || 0, 1) / 2;
-  for (const bundles of bySource.values()) {
+  for (const targets of bySource.values()) {
+    const bundles = Array.from(targets.values());
     const members = bundles.flat();
     // A corridor with only one target still needs its obsolete source slots
     // reclaimed. Specialized and staggered departures keep their own frames.
@@ -38,14 +32,16 @@ export function preserveReturnBundleGroups(graph, gap, baseRadius = 5) {
       const ordered = members.slice().sort((a, b) => coordinate(a) - coordinate(b));
       const runs = [];
       for (const link of ordered)
-        if (runs.at(-1) !== link.target.column) runs.push(link.target.column);
+        if (runs.at(-1) !== link.target) runs.push(link.target);
       return runs.length;
     };
     if (!singleFamily && runCount(l => l.circularPathData.verticalFullExtent) === bundles.length &&
         runCount(l => l.circularPathData.rightFullExtent) === bundles.length) continue;
     // Same origin column: nearer target columns form the inner bundles,
     // matching calcVerticalBuffer's initial target-column order.
-    bundles.sort((a, b) => b[0].target.column - a[0].target.column);
+    bundles.sort((a, b) => b[0].target.column - a[0].target.column ||
+      Math.min(...a.map(l => l.circularPathData.verticalFullExtent)) -
+      Math.min(...b.map(l => l.circularPathData.verticalFullExtent)));
     const sharedX = members.every(link => Math.abs(link.circularPathData.sourceX -
       members[0].circularPathData.sourceX) < 1e-6 &&
       !link.circularPathData.sourcePortWrap && !link.circularPathData.mirroredSourceRadius);

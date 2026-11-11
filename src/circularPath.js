@@ -1,3 +1,6 @@
+import { compactCircularCorridorGaps } from "./circularCorridorCompaction.js";
+import { compactRightTurnGaps } from "./rightTurnCompaction.js";
+import { separateCircularLegs } from "./circularLegClearance.js";
 import {preserveReturnBundleGroups, compactTopReturnShelves, groupTopSourceLegs, roundPinchedTopArrivals, clearForeignSourceSelfLoops} from "./returnBundleGroups.js";
 import {min, linkHorizontal} from "d3";
 
@@ -5927,7 +5930,8 @@ export function addCircularPathData(
   var finalSourceColumns = new Map();
   graph.links.forEach(function (link) {
     if (!link.circular || link.isVirtual || !link.circularPathData ||
-        link.target.column >= link.source.column) return;
+        link.target.column > link.source.column || selfLinking(link, id) ||
+        (compactSourceTurns && link.target.column === link.source.column)) return;
     var key = link.source.column + "|" + link.circularLinkType;
     if (!finalSourceColumns.has(key)) finalSourceColumns.set(key, []);
     finalSourceColumns.get(key).push(link);
@@ -7016,6 +7020,9 @@ export function addCircularPathData(
     groupTopSourceLegs(graph, circularLinkGap || 0, baseRadius);
     roundPinchedTopArrivals(graph, circularLinkGap || 0, baseRadius);
     clearForeignSourceSelfLoops(graph, circularLinkGap || 0);
+    // Reordered source corridors already own a dedicated bridge/slot frame.
+    // Default port ordering also needs final clearance for local returns.
+    if (!compactSourceTurns) separateCircularLegs(graph, circularLinkGap || 0);
   }
 
   graph.links.forEach(function(link) {
@@ -7036,6 +7043,11 @@ export function addCircularPathData(
       link.path = normalPath(link);
     }
   });
+
+  if (compactFinalBacklinks && !compactSourceTurns) {
+    compactRightTurnGaps(graph, circularLinkGap || 0, createCircularPathString);
+    compactCircularCorridorGaps(graph, circularLinkGap || 0, createCircularPathString);
+  }
 
   return graph;
 }
